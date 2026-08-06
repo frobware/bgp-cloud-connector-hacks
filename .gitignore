@@ -1,0 +1,58 @@
+# Deny by default, then allow what we know.
+#
+# This repo sits next to cluster directories holding pull secrets,
+# kubeconfigs, kubeadmin passwords and ccoctl signing keys. An
+# allow-list is the only arrangement where forgetting to add a rule
+# fails safe: a new kind of secret is ignored until somebody
+# deliberately permits it, rather than committed until somebody
+# notices.
+#
+# Adding a file to the repo now takes a line here. That is the point.
+
+*
+
+# Descend into directories, or the allowances below can never match.
+# Files inside still have to be allowed individually.
+!*/
+
+# Tooling and docs.
+!.envrc
+!.gitignore
+!Makefile
+!README.md
+!flake.lock
+!flake.nix
+!go.mod
+!go.sum
+
+# Scripts, named one by one. A glob like !aws-* looks tidier and is
+# wrong: it also matches aws-scratch-secret.json, aws-notes.txt and
+# whatever else you leave lying around with that prefix, which defeats
+# the entire arrangement. Adding a script costs a line here.
+!lib.bash
+!aws-create-cluster
+!aws-create-install-config
+!aws-create-route-servers
+!aws-delete-route-servers
+!aws-destroy-cluster
+!aws-install-saml
+!aws-list-route-servers
+!aws-login
+!get-openshift-install
+
+# Go sources, wherever they live under cmd/.
+!*.go
+
+# Re-denied after the allowances above, because the last matching rule
+# wins and some of these would otherwise be caught by !aws-*.
+#
+#   clusters/  install-config.yaml with the pull secret inlined,
+#              auth/kubeconfig, auth/kubeadmin-password, and the
+#              ccoctl service account signing key
+#   bin/       openshift-install and ccoctl, hundreds of megabytes
+#   aws-credential-process
+#              the binary go build drops here, named like a script
+/clusters/
+/bin/
+/.direnv/
+/aws-credential-process

@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+#
+# Tear down a cluster built by aws-sso-cluster's cluster.sh, including
+# the parts openshift-install does not know about.
+#
+#   CLUSTER=$HOME/clusters/260805 aws-destroy-cluster --dry-run
+#   CLUSTER=$HOME/clusters/260805 aws-destroy-cluster
+#
+# Three sets of resources, keyed on two different identifiers:
+#
+#   route servers      infra id     endpoints bill hourly, and hold the
+#                                   VPC open so the installer cannot
+#                                   delete its own subnets
+#   the cluster        infra id     openshift-install destroy handles it
+#   ccoctl residue     cluster name IAM roles, an OIDC provider and an S3
+#                                   bucket, created before the installer
+#                                   ran and never told to it
+#
+# The installer only ever learns the infra id, so the ccoctl residue
+# survives destroy untouched and keeps sitting in the account. It is
+# free, but it is somebody's audit finding eventually, and the S3
+# bucket name is taken until you remove it, so a rebuild under the same
+# cluster name collides.
+#
+# Both identifiers come from metadata.json, which destroy deletes on
+# success. Hence reading it up front rather than between steps. Once
+# the cluster is gone there is nothing left to read, so name them:
+#
+#   CLUSTER_NAME=aim-260805 INFRA=aim-260805-7sqbd AWS_REGION=us-east-2 \
+#       aws-destroy-cluster
+#
+# Every phase runs even if an earlier one failed, because stopping at
+# the first error is how residue gets left behind. Failures are
+# collected and reported at the end, and the exit status reflects them.
+#
+# This deletes cloud resources and nothing else. The cluster directory
+# stays exactly where it is, with its logs, its install-config, its
+# ccoctl output and its bin/. That is deliberate: yesterday's cluster
+# is still worth reading even though it no longer exists, and a
+# teardown tool that also erases the evidence is a teardown tool you
+# cannot use to work out what went wrong. Delete directories yourself,
+# when you have decided you are finished with them.
+#
+# Overrides: AWS_PROFILE (default saml, matching aws-create-cluster),
+# OPENSHIFT_INSTALL (default openshift-install on PATH), CCOCTL
+# (default: a ccoctl-* alongside OPENSHIFT_INSTALL, else ccoctl on
+# PATH).
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.bash"
+
+parse_args_only_common "$@"
+require_cmd aws
+# Same default as aws-create-cluster: what create built under the saml
+# profile, destroy should find without you having to remember to export
+# it.
+export AWS_PROFILE="${AWS_PROFILE:-saml}"
+require_aws
+
+# Identifiers, from metadata.json unless you have named them. Read
+# before anything is deleted: destroy removes this file.
+cluster_name="${CLUSTER_NAME:-}"
+infra="${INFRA:-}"
+
+# cluster-facts first, metadata.json second.
+#
+# aws-create-cluster writes cluster-facts before anything exists and
+# never deletes it. metadata.json is the installer's, and destroy removes
+# it on success, so a destroy that dies partway through takes the only
+# record of the ccoctl name with it. Preferring our own file means a
+# retry still knows what to clean up.
+# Parsed, not sourced. Sourcing set cluster_name directly from the file,
+# which silently overwrote the value taken from $CLUSTER_NAME above, so
+# the documented override did not work whenever a facts file existed --
+# which, since aws-create-cluster started writing one, is always. It also
+# executed the file and injected every key into this script's namespace.
+read_fact() {
+    awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1"
+}
+
+facts="${CLUSTER:-}/cluster-facts"
+if [ -f "$facts" ]; then
+    [ -n "$cluster_name" ] || cluster_name="$(read_fact "$facts" ccoctl_name)"
+    [ -n "$cluster_name" ] || cluster_name="$(read_fact "$facts" cluster_name)"
+    [ -n "$infra" ] || infra="$(read_fact "$facts" infra_id)"
+    : "${AWS_REGION:=$(read_fact "$facts" region)}"
+    [ -n "$cluster_name" ] && echo "Read identifiers from $facts"
+fi
+
+if [ -z "$cluster_name" ] || [ -z "$infra" ]; then
+    metadata="${CLUSTER:-}/metadata.json"
+    if [ -n "${CLUSTER:-}" ] && [ -f "$metadata" ]; then
+        [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName' "$metadata")"
+        [ -n "$infra" ] || infra="$(jq -r '.infraID' "$metadata")"
+        : "${AWS_REGION:=$(jq -r '.aws.region' "$metadata")}"
+    fi
+fi
+
+# Only the cluster name is indispensable: it keys the ccoctl residue,
+# which exists from the moment run_ccoctl starts. The infra id does not
+# exist until "create cluster" has run, so an install that died before
+# then leaves a facts file without one -- the exact case this script is
+# the recovery for. Missing infra id means less to delete, not an error.
+if [ -z "$cluster_name" ]; then
+    echo "Error: no cluster name in cluster-facts, metadata.json or CLUSTER_NAME" >&2
+    echo "Set CLUSTER to the cluster directory, or name them directly:" >&2
+    echo "  CLUSTER_NAME=<name> INFRA=<infra-id> AWS_REGION=<region> ${0##*/}" >&2
+    exit 1
+fi
+
+if [ -z "${AWS_REGION:-}" ]; then
+    echo "Error: AWS_REGION is not set and could not be read from metadata.json" >&2
+    exit 1
+fi
+export AWS_REGION
+
+# Look in the cluster's own bin/ first. aws-create-cluster puts the
+# installer and ccoctl there on purpose, so that a cluster can always be
+# torn down with the exact binaries that built it. Defaulting to PATH
+# instead made this fail with "openshift-install: command not found"
+# against a directory that had both sitting in bin/.
+#
+# Order: what you asked for, what the cluster owns, what is on PATH.
+if [ -n "${OPENSHIFT_INSTALL:-}" ]; then
+    installer="$OPENSHIFT_INSTALL"
+elif [ -x "${CLUSTER:-}/bin/openshift-install" ]; then
+    installer="$CLUSTER/bin/openshift-install"
+else
+    installer="openshift-install"
+fi
+
+# Same for ccoctl, with one extra case: cluster.sh names it for the
+# version it came out of and drops it beside the installer, so
+# ccoctl-<version> is a legitimate spelling too.
+if [ -z "${CCOCTL:-}" ]; then
+    if [ -x "${CLUSTER:-}/bin/ccoctl" ]; then
+        CCOCTL="$CLUSTER/bin/ccoctl"
+    else
+        CCOCTL=ccoctl
+        if command -v "$installer" >/dev/null 2>&1; then
+            candidates=("$(dirname "$(command -v "$installer")")"/ccoctl-*)
+            [ -x "${candidates[0]}" ] && CCOCTL="${candidates[0]}"
+        fi
+    fi
+fi
+
+echo "Region:       $AWS_REGION"
+echo "Cluster name: $cluster_name"
+echo "Infra id:     ${infra:-<none: the install never created the cluster>}"
+echo "Installer:    $installer"
+echo "ccoctl:       $CCOCTL"
+echo
+
+echo "Will delete:"
+if [ -n "$infra" ]; then
+    echo "  route servers tagged $infra-rs"
+    echo "  the cluster $infra, via openshift-install destroy"
+fi
+echo "  IAM roles, OIDC provider and S3 bucket named for $cluster_name"
+echo
+
+
+# Phase 1. Route servers, before the installer tries the subnets they
+# are attached to. They are tagged with the infra id, so without one
+# there is nothing to look for.
+echo "--- route servers ---"
+if [ -z "$infra" ]; then
+    echo "  no infra id, skipping"
+else
+    rs_args=()
+    [ "$dry_run" = true ] && rs_args=(--dry-run)
+    if ! INFRA="$infra" AWS_REGION="$AWS_REGION" \
+            "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/aws-delete-route-servers" "${rs_args[@]}"; then
+        fail "aws-delete-route-servers"
+    fi
+fi
+echo
+
+# Phase 2. The cluster itself.
+echo "--- cluster ---"
+if [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
+    if ! try "$installer" destroy cluster --dir="$CLUSTER" --log-level=info; then
+        fail "openshift-install destroy cluster"
+    fi
+else
+    echo "  no metadata.json, assuming the cluster is already gone"
+fi
+echo
+
+# Phase 3. The ccoctl residue. Keyed on cluster name, so this is the
+# step that needs an identifier destroy has just thrown away.
+echo "--- ccoctl residue ---"
+if ! try "$CCOCTL" aws delete --name "$cluster_name" --region "$AWS_REGION"; then
+    fail "ccoctl aws delete"
+fi
+echo
+
+# Phase 4. Say what is actually left rather than trusting the above.
+# After a clean run this finds nothing, including the installer's own
+# master and worker roles, whose names also start with the cluster name.
+echo "--- remaining ---"
+if [ "$dry_run" = true ]; then
+    echo "  (skipped: nothing was deleted)"
+else
+    # Match on "<name>-", never the bare name. Cluster names here are
+    # <user>-<timestamp>, so aim-260805 is a prefix of aim-2608051714 and
+    # a bare prefix match reports the other cluster's resources as this
+    # one's leftovers. Every name we care about has a separator after
+    # the cluster name: ccoctl roles are <name>-<namespace>-<secret>,
+    # the OIDC bucket is <name>-oidc, and the infra id is <name>-<5>.
+    #
+    # A listing that fails -- the session expiring during a half-hour
+    # destroy is the usual way -- is recorded, not fatal: dying here on
+    # set -e would skip the report this phase exists to produce, and
+    # "nothing" is not a claim we can make about resources we could not
+    # list.
+    listed=true
+    roles="$(aws iam list-roles \
+        --query "Roles[?starts_with(RoleName,'${cluster_name}-')].RoleName" --output text)" \
+        || { listed=false; roles=""; fail "could not list IAM roles"; }
+    oidc_raw="$(aws iam list-open-id-connect-providers --output text)" \
+        || { listed=false; oidc_raw=""; fail "could not list OIDC providers"; }
+    oidc="$(printf '%s' "$oidc_raw" | tr '\t' '\n' | grep "/${cluster_name}-oidc\." || true)"
+    buckets="$(aws s3api list-buckets \
+        --query "Buckets[?starts_with(Name,'${cluster_name}-')].Name" --output text)" \
+        || { listed=false; buckets=""; fail "could not list S3 buckets"; }
+
+    if [ "$listed" = true ] && [ -z "$roles$oidc$buckets" ]; then
+        echo "  nothing"
+    else
+        for r in $roles; do echo "  iam role       $r"; done
+        for o in $oidc;  do echo "  oidc provider  $o"; done
+        for b in $buckets; do echo "  s3 bucket      $b"; done
+        if [ -n "$roles$oidc$buckets" ]; then
+            fail "resources remain, see above"
+        fi
+    fi
+fi
+echo
+
+if [ -n "${CLUSTER:-}" ]; then
+    info "Cloud resources only. This directory is untouched, bin/ included:"
+    info "  $CLUSTER"
+    info "Remove it by hand once you no longer want the logs."
+fi
+
+report

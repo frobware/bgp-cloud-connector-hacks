@@ -1,0 +1,789 @@
+#!/usr/bin/env bash
+#
+# Build an OpenShift cluster on AWS with STS credentials, the way
+# aws-sso-cluster's cluster.sh does, but checking things first.
+#
+#   aws-create-cluster --dry-run
+#   aws-create-cluster
+#
+# It takes no arguments and asks nothing. The cluster lands in clusters/<YYMMDDHHMM>
+# inside this repo, which is gitignored: the directory ends up holding
+# install-config.yaml with your pull secret inlined, auth/kubeconfig,
+# auth/kubeadmin-password and the ccoctl service account signing key.
+#
+# Every precondition is checked before anything is created, and they
+# are all reported together rather than one per run. The list is not
+# generic caution; each entry is something that has actually cost an
+# afternoon:
+#
+#   - AWS_PROFILE not reaching openshift-install, so it silently used
+#     the default profile and died with 401 AuthFailure on
+#     DescribeInstanceTypes after the preflight had "passed"
+#   - credential requests extracted without --included, producing a
+#     manifest for a capability the cluster does not enable, which
+#     wedges cluster-bootstrap forever and times out at 45 minutes
+#     with the control plane otherwise perfectly healthy
+#   - ccoctl extracted from the payload and not runnable on NixOS,
+#     discovered three steps into an install
+#   - a role capping sessions at 3600s against a 45 minute install
+#   - a cluster name whose OIDC bucket already existed
+#
+# Retrying means running it again. That produces a new directory, so
+# nothing from the failed attempt can leak into the next one, and the
+# failed attempt stays readable. It costs re-downloading the installer,
+# about ninety seconds, which is a fair price for never installing from
+# artefacts you did not mean to keep.
+#
+# Naming is by convention: <user>-<YYMMDDHHMM>, so aim-2608051045. The
+# date is what the team already uses; the time means every invocation
+# gets its own name and directory, which matters because the OIDC bucket
+# name has to be globally unique and a date alone collides with itself.
+#
+# Only the user part is overridable, and only when your local account
+# name is not the one you want showing up in AWS.
+#
+# A cluster directory owns everything it needs, including its own
+# openshift-install and ccoctl under bin/. That costs about 840MB per
+# cluster and buys the guarantee that a cluster can always be torn
+# down with the exact binaries that built it, whatever later installs
+# have done.
+#
+# Environment:
+#
+#   CLUSTER_USER         default $USER
+#   CLUSTER              cluster directory, default clusters/<YYMMDDHHMM>
+#   OPENSHIFT_INSTALL    default <cluster>/bin/openshift-install, fetched if absent
+#   CCOCTL               default <cluster>/bin/ccoctl, extracted if absent
+#   OCP_CHANNEL          passed to get-openshift-install, default stable-4.22
+#   INSTALL_CONFIG       a config to copy in; the copy's metadata.name
+#                        is rewritten to the generated cluster name.
+#                        Default: generate one
+#   PULL_SECRET          default ~/.secrets/pull-secret.json
+#   AWS_PROFILE          default saml
+
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+source "$here/lib.bash"
+
+parse_args_only_common "$@"
+
+# The name is always a timestamp, and there is deliberately no way to
+# supply one. Retrying means running again, which gives a fresh
+# directory, so nothing from the failed attempt can leak into the next
+# one and the failed attempt stays readable.
+#
+# Being able to name a cluster is what makes reusing a directory easy,
+# and reusing a directory is how you end up installing from artefacts
+# you did not mean to keep. Removing the argument removes the hazard
+# rather than guarding against it.
+#
+# Run twice inside the same minute and you collide. That is your
+# problem to resolve, by deleting the directory or waiting a minute;
+# the script will not guess which you meant.
+short_name="$(date +%y%m%d%H%M)"
+cluster_user="${CLUSTER_USER:-${USER:-$(whoami)}}"
+cluster_name="$cluster_user-$short_name"
+
+# The OCP version goes in the directory name, not the cluster name. A
+# cluster name is squeezed from both ends: openshift-install caps it at
+# 54 characters and ccoctl truncates IAM role names at 64, so spending
+# characters there costs you distinguishable role names. Directory names
+# have no such limit, and the version is exactly what you want to see
+# when comparing two clusters months later, or when recording that some
+# behaviour held on 4.22.8 and may not on 4.21.
+#
+# get-openshift-install resolves the channel, so ask it rather than
+# duplicating that logic. If OPENSHIFT_INSTALL is already set and
+# runnable, ask the binary instead and stay offline.
+resolve_ocp_version() {
+    if [ -n "${OPENSHIFT_INSTALL:-}" ] && [ -x "${OPENSHIFT_INSTALL:-}" ]; then
+        "$OPENSHIFT_INSTALL" version 2>/dev/null | head -1 | awk '{print $2}'
+        return 0
+    fi
+    "$here/get-openshift-install" --print-version 2>/dev/null
+}
+
+ocp_version="$(resolve_ocp_version || true)"
+
+# Fatal rather than falling back to "unknown". A directory named
+# clusters/2608061003-unknown that then downloads 4.22.8 into itself is
+# worse than no suffix at all: the name is the thing you trust months
+# later when comparing two clusters, and a name that lies is a trap. If
+# the version cannot be resolved, something is wrong with the mirror or
+# the network, and that is worth knowing before a 45 minute install.
+[ -n "$ocp_version" ] || die "could not determine the OCP version" \
+    "get-openshift-install --print-version returned nothing." \
+    "Check the VPN, the mirror, and OCP_CHANNEL (currently ${OCP_CHANNEL:-stable-4.22})." \
+    "Or set OPENSHIFT_INSTALL to a binary you already have."
+
+# Compressed: 4.22.8 becomes 4228, which sorts and greps better in a
+# path than dots do.
+ocp_tag="$(printf '%s' "$ocp_version" | tr -d '.')"
+
+cluster_dir="${CLUSTER:-$here/clusters/$short_name-$ocp_tag}"
+bin_dir="$cluster_dir/bin"
+pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
+export AWS_PROFILE="${AWS_PROFILE:-saml}"
+
+installer="${OPENSHIFT_INSTALL:-$bin_dir/openshift-install}"
+ccoctl="${CCOCTL:-$bin_dir/ccoctl}"
+
+# ---------------------------------------------------------------------
+# Predicates. Each answers one question and says nothing about what to
+# do when the answer is no, so they compose into check and wait_until.
+# ---------------------------------------------------------------------
+
+installer_present() { [ -x "$installer" ]; }
+
+installer_reports_release() {
+    "$installer" version 2>/dev/null | grep -q 'release image'
+}
+
+aws_identity_ok() { aws sts get-caller-identity >/dev/null 2>&1; }
+
+# openshift-install resolves credentials through the SDK chain, not
+# through our --profile flags, so prove the exported profile is the one
+# it will actually get rather than assuming.
+aws_profile_is_exported() { [ -n "${AWS_PROFILE:-}" ]; }
+
+config_is_yaml() { python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$1"; }
+
+config_has_manual_credentials() {
+    grep -qE '^credentialsMode:[[:space:]]*Manual' "$1"
+}
+
+config_has_pull_secret() { grep -q '^pullSecret:' "$1"; }
+config_has_ssh_key()     { grep -q '^sshKey:' "$1"; }
+
+config_region() { grep -E '^   *region:' "$1" | awk '{print $2}' | head -1; }
+config_base_domain() { grep -E '^baseDomain:' "$1" | awk '{print $2}' | head -1; }
+config_control_plane_replicas() {
+    awk '/^controlPlane:/{f=1} f&&/^  replicas:/{print $2; exit}' "$1"
+}
+
+hosted_zone_exists() {
+    local domain="$1"
+    aws route53 list-hosted-zones \
+        --query "HostedZones[?Name=='${domain}.'].Id" --output text 2>/dev/null \
+        | grep -q hostedzone
+}
+
+oidc_bucket_free() {
+    local n
+    n="$(aws s3api list-buckets --query "Buckets[?Name=='${1}-oidc'].Name" --output text 2>/dev/null)"
+    [ -z "$n" ]
+}
+
+iam_roles_free() {
+    local n
+    n="$(aws iam list-roles --query "Roles[?starts_with(RoleName,'${1}-')].RoleName" --output text 2>/dev/null)"
+    [ -z "$n" ]
+}
+
+# A directory carrying metadata.json has already produced a cluster,
+# whether or not it still exists in AWS. Reusing it conflates two
+# clusters in one directory, and teardown then has one metadata.json for
+# two sets of resources.
+cluster_dir_free() {
+    [ ! -e "$1/metadata.json" ]
+}
+
+# Nothing at all, not even leftovers from a failed attempt. Since the
+# name is a timestamp this only fires if you ran twice in a minute, or
+# pointed CLUSTER somewhere already in use.
+dir_is_empty() {
+    [ ! -d "$1" ] || [ -z "$(ls -A "$1" 2>/dev/null)" ]
+}
+
+ccoctl_runnable() { [ -x "$1" ] && "$1" --help >/dev/null 2>&1; }
+
+# openshift-install rejects metadata.name over 54 characters. That is
+# not the limit worth worrying about though: ccoctl names IAM roles
+# <cluster>-<namespace>-<secret> and truncates at 64, which on a
+# 14-character cluster name already loses the tail:
+#
+#   aim-260805-openshift-cloud-credential-operator-cloud-credential-
+#
+# The longer the cluster name, the fewer characters remain to tell seven
+# roles apart, and truncated names can collide. 30 is comfortable; the
+# installer's 54 is not.
+name_length_ok()   { [ ${#1} -le 54 ]; }
+name_length_sane() { [ ${#1} -le 30 ]; }
+
+# openshift-install enforces RFC 1123 on metadata.name and rejects the
+# whole config if it fails. Checking it here rather than discovering it
+# after the installer has been downloaded and ccoctl patched.
+config_name() { awk '/^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$1"; }
+
+name_is_rfc1123() { printf '%s' "$1" | grep -qE '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'; }
+
+config_has_name() { [ -n "$(config_name "$1")" ]; }
+
+config_name_is_valid() {
+    local n
+    n="$(config_name "$1")"
+    [ -n "$n" ] && name_is_rfc1123 "$n"
+}
+
+# ---------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------
+
+ensure_installer() {
+    if [ -x "$installer" ] && "$installer" version >/dev/null 2>&1; then
+        info "  openshift-install already in $bin_dir"
+        return 0
+    fi
+    BIN_DIR="$bin_dir" "$here/get-openshift-install"
+}
+
+ensure_ccoctl() {
+    local release_image
+    if ccoctl_runnable "$ccoctl"; then
+        info "  ccoctl already present and runnable"
+        return 0
+    fi
+
+    mkdir -p "$bin_dir"
+
+    if [ ! -f "$ccoctl" ]; then
+        release_image="$("$installer" version | awk '/release image/ {print $3}')"
+        local cco_image
+        # -a on every call. extract_ccoctl.sh omits it on the
+        # --image-for lookup and falls back to ~/.docker/config.json,
+        # which on a credsStore setup has no usable inline auth.
+        cco_image="$(retry 3 10 oc adm release info \
+            --registry-config="$pull_secret" \
+            --image-for=cloud-credential-operator "$release_image")" || return 1
+        info "  extracting ccoctl from $cco_image"
+        ( cd "$bin_dir" && retry 3 10 oc image extract "$cco_image" \
+            --file=/usr/bin/ccoctl -a "$pull_secret" ) || return 1
+        chmod +x "$ccoctl"
+    fi
+
+    # The payload binary is dynamically linked for a generic Linux. On
+    # NixOS PT_INTERP points at a stub loader that refuses to run it,
+    # while ldd resolves everything and looks fine.
+    if ! ccoctl_runnable "$ccoctl"; then
+        command -v patchelf >/dev/null 2>&1 || {
+            warn "  ccoctl will not execute and patchelf is not available"
+            return 1
+        }
+        local interp
+        interp="$(patchelf --print-interpreter "$(readlink -f "$(command -v ls)")")"
+        info "  patching ccoctl interpreter to $interp"
+        patchelf --set-interpreter "$interp" --set-rpath "$(dirname "$interp")" "$ccoctl"
+        ccoctl_runnable "$ccoctl" || return 1
+    fi
+}
+
+# Everything downstream derives from the config, so validating it on
+# resume guards the manifest, credreq and ccoctl skips too. Presence is
+# not correctness: a run that failed after writing a config for a
+# different cluster would otherwise be silently resumed, and you would
+# install the wrong thing from artefacts that merely exist.
+config_matches_request() {
+    local f="$1" want="$2" got
+    got="$(awk '/^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$f")"
+    [ "$got" = "$want" ]
+}
+
+# The name is always ours, even when the config is yours. INSTALL_CONFIG
+# supplies topology -- region, replicas, instance types -- but identity
+# stays the generated timestamp name: ccoctl resources, the infra id,
+# the facts file and teardown's prefix matching all key on one name, and
+# a config-supplied name would quietly diverge from every one of them.
+# Only the copy is renamed; the source file is left untouched.
+rename_config() {
+    local f="$1" original
+    original="$(config_name "$f")"
+    [ "$original" = "$cluster_name" ] && return 0
+    # umask, because the rewrite goes through a scratch file and the
+    # pull secret is inside.
+    ( umask 077; awk -v name="$cluster_name" '
+        /^metadata:/ { in_md = 1 }
+        in_md && /^  name:/ { print "  name: " name; in_md = 0; next }
+        { print }
+    ' "$f" > "$f.renamed" )
+    mv "$f.renamed" "$f"
+    config_matches_request "$f" "$cluster_name" \
+        || die "could not rewrite metadata.name in $f" \
+            "It still names $(config_name "$f"), not $cluster_name."
+    info "  renamed metadata.name: $original -> $cluster_name"
+}
+
+prepare_config() {
+    mkdir -p "$cluster_dir"
+    local existing=""
+    [ -f "$cluster_dir/install-config.yaml.bak" ] && existing="$cluster_dir/install-config.yaml.bak"
+    [ -f "$cluster_dir/install-config.yaml" ] && existing="$cluster_dir/install-config.yaml"
+
+    if [ -n "$existing" ]; then
+        if config_matches_request "$existing" "$cluster_name"; then
+            info "  install-config already present for $cluster_name"
+            return 0
+        fi
+        die "$existing is for a different cluster" \
+            "It names $(awk '/^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$existing"), not $cluster_name." \
+            "Resuming would install from artefacts that do not match what you asked for." \
+            "Either pick a different short name, or remove $cluster_dir and start again."
+    fi
+    if [ -n "${INSTALL_CONFIG:-}" ]; then
+        install -m 600 "$INSTALL_CONFIG" "$cluster_dir/install-config.yaml"
+        rename_config "$cluster_dir/install-config.yaml"
+    else
+        CLUSTER_NAME="$cluster_name" PULL_SECRET="$pull_secret" \
+            "$here/aws-create-install-config" "$cluster_dir/install-config.yaml"
+    fi
+    # create manifests consumes the original, and the credential
+    # request extraction below needs it to work out which capabilities
+    # this cluster actually enables.
+    cp "$cluster_dir/install-config.yaml" "$cluster_dir/install-config.yaml.bak"
+}
+
+# Everything teardown needs, in a file that nothing else deletes.
+#
+# aws-destroy-cluster used to read metadata.json, which openshift-install
+# removes on a successful destroy. That works, but it fails in the one
+# case the script exists for: if destroy dies after deleting
+# metadata.json, the handle on the ccoctl residue is gone and you are
+# back to grepping IAM by eye.
+#
+# Written before anything is created, so it exists even if the install
+# never finishes. The infra id is added afterwards, because it does not
+# exist until create cluster has run.
+facts_file() { printf '%s' "$cluster_dir/cluster-facts"; }
+
+write_cluster_facts() {
+    mkdir -p "$cluster_dir"
+    cat > "$(facts_file)" <<EOF
+# Written by aws-create-cluster. Read by aws-destroy-cluster.
+# Survives teardown on purpose: metadata.json does not.
+cluster_name=$cluster_name
+ccoctl_name=$cluster_name
+region=$region
+base_domain=$(config_base_domain "$cluster_dir/install-config.yaml.bak")
+ocp_version=${ocp_version:-unknown}
+cluster_dir=$cluster_dir
+EOF
+    info "  wrote $(facts_file)"
+}
+
+record_infra_id() {
+    local md="$cluster_dir/metadata.json"
+    if [ ! -f "$md" ]; then
+        warn "  no metadata.json, cannot record the infra id"
+        return 1
+    fi
+    local infra
+    infra="$(jq -r '.infraID' "$md")"
+    printf 'infra_id=%s\n' "$infra" >> "$(facts_file)"
+    info "  recorded infra_id=$infra"
+}
+
+# ccoctl cannot tag what it creates, so do it here. Without a tag the
+# only way to find orphaned ccoctl resources is to guess at name
+# prefixes, which is how tonight's sweep matched the wrong cluster:
+# aim-260805 is a prefix of aim-2608051714.
+#
+# Tagging is best-effort. A missing tag costs you a harder search later;
+# it does not make the cluster wrong. So this runs as a phase.
+tag_ccoctl_resources() {
+    local tag_key="bgp-hacks/cluster" ok=0 failed=0
+
+    local role
+    for role in $(aws iam list-roles \
+            --query "Roles[?starts_with(RoleName,'${cluster_name}-')].RoleName" --output text); do
+        if aws iam tag-role --role-name "$role" \
+                --tags "Key=${tag_key},Value=${cluster_name}" 2>/dev/null; then
+            ok=$((ok + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    done
+
+    local arn
+    arn="$(aws iam list-open-id-connect-providers --output text \
+        | tr '\t' '\n' | grep "/${cluster_name}-oidc\." || true)"
+    if [ -n "$arn" ]; then
+        if aws iam tag-open-id-connect-provider --open-id-connect-provider-arn "$arn" \
+                --tags "Key=${tag_key},Value=${cluster_name}" 2>/dev/null; then
+            ok=$((ok + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    fi
+
+    # put-bucket-tagging replaces the whole tag set, so merge rather than
+    # clobber whatever ccoctl or a bucket policy put there.
+    local bucket="${cluster_name}-oidc" existing merged
+    if aws s3api head-bucket --bucket "$bucket" 2>/dev/null; then
+        existing="$(aws s3api get-bucket-tagging --bucket "$bucket" \
+            --query 'TagSet' --output json 2>/dev/null || printf '[]')"
+        merged="$(printf '%s' "$existing" \
+            | jq -c --arg k "$tag_key" --arg v "$cluster_name" \
+                'map(select(.Key != $k)) + [{Key:$k, Value:$v}]')"
+        if aws s3api put-bucket-tagging --bucket "$bucket" \
+                --tagging "{\"TagSet\":$merged}" 2>/dev/null; then
+            ok=$((ok + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    fi
+
+    info "  tagged $ok resource(s) with ${tag_key}=${cluster_name}"
+    [ "$failed" -eq 0 ] || { warn "  $failed tag(s) failed"; return 1; }
+    return 0
+}
+
+# Drop a .envrc in the cluster directory so cd-ing into it points oc at
+# that cluster. source_up_if_exists keeps the repo's own flake shell, so
+# you do not lose your tools by descending into a subdirectory.
+#
+# Allowing it needs direnv, which not everybody has. Missing direnv is
+# not an error: the file is still written and still correct, you just
+# have to source it or export KUBECONFIG yourself. These scripts are
+# meant to be shareable, so they tolerate other people's setups.
+write_cluster_envrc() {
+    cat > "$cluster_dir/.envrc" <<'EOF'
+# Written by aws-create-cluster. Keeps the repo's flake shell, then
+# points oc and openshift-install at this cluster.
+source_up_if_exists
+export KUBECONFIG="$PWD/auth/kubeconfig"
+EOF
+    if command -v direnv >/dev/null 2>&1; then
+        if direnv allow "$cluster_dir" 2>/dev/null; then
+            info "  wrote and allowed $cluster_dir/.envrc"
+        else
+            info "  wrote $cluster_dir/.envrc (direnv allow failed, run it yourself)"
+        fi
+    else
+        info "  wrote $cluster_dir/.envrc (no direnv; source it or export KUBECONFIG)"
+    fi
+}
+
+create_manifests() {
+    if [ -d "$cluster_dir/manifests" ]; then
+        info "  manifests already generated"
+        return 0
+    fi
+    "$installer" create manifests --dir="$cluster_dir"
+}
+
+extract_credential_requests() {
+    if [ -d "$cluster_dir/credreqs" ] && [ -n "$(ls -A "$cluster_dir/credreqs" 2>/dev/null)" ]; then
+        info "  credential requests already extracted"
+        return 0
+    fi
+    local release_image
+    release_image="$("$installer" version | awk '/release image/ {print $3}')"
+    mkdir -p "$cluster_dir/credreqs"
+    # --included asks the payload to filter requests down to the
+    # capabilities this install-config enables. It helps, but it is not
+    # sufficient: measured against 4.22.8 it still emits the cluster-api
+    # request on a default AWS install, apparently because that
+    # CredentialsRequest carries no capability annotation for it to match
+    # on. So the explicit drop below is doing the real work.
+    retry 3 10 oc adm release extract --credentials-requests --included \
+        --install-config="$cluster_dir/install-config.yaml.bak" \
+        --registry-config="$pull_secret" \
+        --cloud=aws --to="$cluster_dir/credreqs" "$release_image"
+    drop_requests_for_disabled_capabilities
+    info "  $(find "$cluster_dir/credreqs" -type f | wc -l) credential request(s)"
+}
+
+# A CredentialsRequest whose component the cluster will not run is not
+# merely useless, it is fatal. ccoctl turns it into a Secret targeting a
+# namespace that never gets created, cluster-bootstrap retries that
+# Secret forever, never writes kube-system/bootstrap, and bootstrapping
+# times out at 45 minutes with a completely healthy control plane.
+#
+# Measured on 4.22.8, the offender is openshift-cluster-api-aws:
+#
+#   capability.openshift.io/name: CloudCredential
+#   release.openshift.io/feature-gate: ClusterAPIMachineManagement
+#
+# It is gated by a feature gate but annotated with a capability. oc adm
+# release extract --included filters on capabilities, sees
+# CloudCredential is enabled, and keeps it. Meanwhile
+# ClusterAPIMachineManagement is disabled in the default feature set, so
+# openshift-cluster-api never exists and its Secret can never be
+# created.
+#
+# Filtering on the feature-gate annotation catches it, and catches
+# anything else the payload gates the same way, rather than hardcoding
+# one filename. Dropping the request rather than the manifest also means
+# no IAM role gets created for it.
+#
+# The assumption baked in here is that a gate-annotated request means a
+# disabled gate. That holds today, but gates get promoted into the
+# Default set while the annotation lingers on the request, and there is
+# nothing to ask from out here: the default feature set lives inside the
+# payload's binaries, not in any manifest we can read pre-install. So
+# the day a promoted gate ships, this drops a request the cluster needs
+# and its operator degrades for want of an IAM role. Hence parking the
+# dropped requests in credreqs-dropped/ rather than deleting them: the
+# person debugging that degradation finds the request, moves it back
+# into credreqs/, and reruns ccoctl aws create-all in the cluster
+# directory by hand.
+drop_requests_for_disabled_capabilities() {
+    local config="$cluster_dir/install-config.yaml.bak"
+    local feature_set
+    feature_set="$(awk '/^featureSet:/{print $2; exit}' "$config")"
+
+    # A non-default feature set may well enable these, and we cannot
+    # tell which from here, so keep everything and say so.
+    if [ -n "$feature_set" ] && [ "$feature_set" != '""' ] && [ "$feature_set" != "Default" ]; then
+        info "  featureSet is $feature_set, keeping all requests"
+        return 0
+    fi
+
+    local f dropped=0
+    for f in "$cluster_dir"/credreqs/*; do
+        [ -f "$f" ] || continue
+        local gate
+        gate="$(awk -F': *' '/release\.openshift\.io\/feature-gate:/{print $2; exit}' "$f")"
+        [ -n "$gate" ] || continue
+        info "  dropping $(basename "$f"): gated by $gate, assumed not in the default feature set"
+        mkdir -p "$cluster_dir/credreqs-dropped"
+        mv "$f" "$cluster_dir/credreqs-dropped/"
+        dropped=$((dropped + 1))
+    done
+    if [ "$dropped" -eq 0 ]; then
+        info "  no feature-gated requests to drop"
+    else
+        info "  parked in credreqs-dropped/, in case a gate was promoted"
+    fi
+    return 0
+}
+
+run_ccoctl() {
+    if [ -d "$cluster_dir/ccoctl-output/manifests" ]; then
+        info "  ccoctl output already present"
+        return 0
+    fi
+    ( cd "$cluster_dir" && "$ccoctl" aws create-all \
+        --name="$cluster_name" \
+        --region="$region" \
+        --credentials-requests-dir=./credreqs \
+        --output-dir=./ccoctl-output )
+}
+
+merge_manifests() {
+    cp "$cluster_dir"/ccoctl-output/manifests/* "$cluster_dir/manifests/"
+    cp -a "$cluster_dir/ccoctl-output/tls" "$cluster_dir/"
+}
+
+create_cluster() {
+    # The installer would otherwise pick up agent keys that conflict
+    # with the cluster's own.
+    unset SSH_AUTH_SOCK
+    "$installer" create cluster --dir="$cluster_dir" --log-level=info
+}
+
+# Predicates for the post-install wait. Conditions, never columns: the
+# VERSION column in "oc get co" is empty precisely while an operator is
+# rolling out, so every field shifts left and $3 becomes PROGRESSING.
+# That reported 34/34 Available while monitoring was broken.
+operators_total() {
+    KUBECONFIG="$cluster_dir/auth/kubeconfig" oc get co -o json 2>/dev/null \
+        | jq -r '.items | length'
+}
+
+operators_unavailable() {
+    KUBECONFIG="$cluster_dir/auth/kubeconfig" oc get co -o json 2>/dev/null \
+        | jq -r '[.items[] | select(([(.status.conditions // [])[]
+            | select(.type=="Available") | .status] | first) != "True")
+            | .metadata.name] | join(" ")'
+}
+
+all_operators_available() {
+    local bad total
+    bad="$(operators_unavailable)"
+    total="$(operators_total)"
+    [ -n "$total" ] || return 1
+    if [ -z "$bad" ]; then
+        info "  $total/$total operators Available"
+        return 0
+    fi
+    info "  waiting on: $bad"
+    return 1
+}
+
+# The installer exiting zero means it stopped waiting, not that the
+# cluster is well. Today it declared success on a cluster whose
+# monitoring operator was Degraded. So check, with wait_until doing the
+# polling and the timeout.
+verify_cluster() {
+    wait_until 900 30 "every cluster operator to become Available" \
+        all_operators_available \
+        || fail "some operators never became Available, see above"
+    return 0
+}
+
+# ---------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------
+
+info "Cluster:   $cluster_name"
+info "Directory: $cluster_dir"
+info "Tools:     $bin_dir (this cluster owns them)"
+info "Profile:   $AWS_PROFILE"
+info ""
+
+info "--- preflight ---"
+check "aws on PATH"                    command -v aws
+check "oc on PATH"                     command -v oc
+check "jq on PATH"                     command -v jq
+check "python3 on PATH"                command -v python3
+check "AWS_PROFILE is exported"        aws_profile_is_exported
+check "AWS credentials work"           aws_identity_ok
+check "pull secret readable"           jq -e . "$pull_secret"
+check "cluster directory unused"       cluster_dir_free "$cluster_dir"
+check "cluster directory is empty"     dir_is_empty "$cluster_dir"
+check "name within 54 chars"           name_length_ok "$cluster_name"
+check_warn "name leaves room for IAM role names" name_length_sane "$cluster_name"
+abort_if_failed
+
+# Everything below runs on exit. The scratch directory always wants
+# removing; the cleanup guidance only applies between the first step
+# that creates something in AWS and the summary, and only on failure.
+# One combined trap, because traps replace rather than stack, and an
+# ERR trap does not work here anyway: step reports failure through
+# die's plain exit 1, which ERR never sees.
+scratch=""
+cleanup_guidance=false
+on_exit() {
+    local status=$?
+    [ -n "$scratch" ] && rm -rf "$scratch"
+    if [ "$status" -ne 0 ] && [ "$cleanup_guidance" = true ]; then
+        warn ""
+        warn "Failed partway through. To clean up whatever exists:"
+        warn "  aws-destroy-cluster   (CLUSTER=$cluster_dir)"
+    fi
+}
+trap on_exit EXIT
+
+# Validate the config that will actually be installed. With
+# INSTALL_CONFIG that is your file: the region and base domain read here
+# feed ccoctl and the facts file, so checking a generated stand-in would
+# validate one cluster and build another. Without it, generate one
+# somewhere disposable -- writing a config creates nothing in AWS.
+#
+# The real path used to call prepare_config here, which meant a preflight
+# that then failed -- on a taken OIDC bucket name, say -- had already
+# created the cluster directory and written a config with your pull
+# secret into it. That left a directory behind that "cluster directory is
+# empty" would refuse next time, from a run that created nothing in AWS
+# and reported as such. Now the directory is only touched once every
+# precondition has passed, by the "install config" step.
+if [ -n "${INSTALL_CONFIG:-}" ]; then
+    config="$INSTALL_CONFIG"
+    [ -f "$config" ] || die "INSTALL_CONFIG points at $config, which does not exist"
+else
+    scratch="$(mktemp -d)"
+    CLUSTER_NAME="$cluster_name" PULL_SECRET="$pull_secret" \
+        "$here/aws-create-install-config" "$scratch/install-config.yaml" >/dev/null
+    config="$scratch/install-config.yaml"
+fi
+
+region="$(config_region "$config")"
+base_domain="$(config_base_domain "$config")"
+replicas="$(config_control_plane_replicas "$config")"
+
+check "install-config parses as YAML"     config_is_yaml "$config"
+if [ -n "${INSTALL_CONFIG:-}" ]; then
+    # The copy gets its metadata.name rewritten to the generated
+    # cluster name, so what has to be valid is that name and the
+    # existence of a name line to rewrite, not whatever name your
+    # file happens to carry.
+    check "config has a metadata.name to rewrite" config_has_name "$config"
+    check "generated name is RFC 1123 valid"  name_is_rfc1123 "$cluster_name"
+else
+    check "metadata.name is RFC 1123 valid"   config_name_is_valid "$config"
+fi
+check "credentialsMode is Manual"         config_has_manual_credentials "$config"
+check "install-config has a pull secret"  config_has_pull_secret "$config"
+check "install-config has an ssh key"     config_has_ssh_key "$config"
+check "region is set"                     test -n "$region"
+check "hosted zone for $base_domain"      hosted_zone_exists "$base_domain"
+check "OIDC bucket ${cluster_name}-oidc is free" oidc_bucket_free "$cluster_name"
+check "no IAM roles named ${cluster_name}-*"     iam_roles_free "$cluster_name"
+check_warn "three control-plane nodes"    test "$replicas" = "3"
+abort_if_failed
+
+if [ "$replicas" != "3" ]; then
+    warn "  control plane has $replicas node(s). Every kube-apiserver"
+    warn "  rollout will take the API down until it completes."
+fi
+
+# A short session against a long install is worth knowing about now.
+role_arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null || true)"
+role_name="${role_arn#*assumed-role/}"; role_name="${role_name%%/*}"
+max_session="$(aws iam get-role --role-name "$role_name" \
+    --query Role.MaxSessionDuration --output text 2>/dev/null || echo unknown)"
+if [ "$max_session" != "unknown" ] && [ "$max_session" -lt 5400 ] 2>/dev/null; then
+    warn "  WARN  role $role_name caps sessions at ${max_session}s"
+    warn "        A cluster install takes 35-45 minutes and the installer"
+    warn "        does not refresh credentials. Mint fresh ones now:"
+    warn "        aws-login --force"
+fi
+info ""
+
+if [ "$dry_run" = true ]; then
+    info "Would create $cluster_name in ${region:-<from config>}."
+    report
+    exit $?
+fi
+
+# No confirmation prompt. This was copied from the teardown scripts,
+# where typing the cluster name is a real safeguard because the operation
+# destroys things you cannot get back. Creating is additive, and the
+# preflight above is the actual guard: it refuses on a taken OIDC bucket
+# name, existing IAM roles, a non-empty directory, or a name the
+# installer would reject. Asking you to retype a timestamp you did not
+# choose adds nothing.
+#
+# --dry-run is still the way to rehearse.
+
+# From here on things exist in AWS, so the exit trap starts saying what
+# to do if it goes wrong.
+cleanup_guidance=true
+
+step "openshift-install"     ensure_installer
+step "install config"        prepare_config
+# Early, so cd-ing into the directory works while the install is still
+# running rather than only once it finishes.
+step "cluster .envrc"        write_cluster_envrc
+step "cluster facts"         write_cluster_facts
+step "ccoctl"                ensure_ccoctl
+step "manifests"             create_manifests
+step "credential requests"   extract_credential_requests
+step "IAM roles and OIDC"    run_ccoctl
+step "merge STS manifests"   merge_manifests
+step "create cluster"        create_cluster
+# phase, not step: a cluster that installed but has a sulking operator
+# is still a cluster you want to keep and look at, so record the failure
+# and carry on to the summary rather than dying here.
+# Both best-effort: neither affects whether the cluster works, but both
+# make it findable and removable later.
+phase "record infra id"      record_infra_id
+phase "tag ccoctl resources" tag_ccoctl_resources
+phase "verify operators"     verify_cluster
+
+# The cluster exists now. A sulking operator makes report exit non-zero,
+# but "destroy it" is not the advice for that.
+cleanup_guidance=false
+
+info ""
+export KUBECONFIG="$cluster_dir/auth/kubeconfig"
+
+info "Cluster:    $cluster_name"
+info "Kubeconfig: $cluster_dir/auth/kubeconfig"
+info "            export KUBECONFIG=$cluster_dir/auth/kubeconfig"
+info "Password:   $cluster_dir/auth/kubeadmin-password"
+info ""
+info "Tear it down with:"
+info "  CLUSTER=$cluster_dir aws-destroy-cluster"
+report

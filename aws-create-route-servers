@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+#
+# Create the AWS VPC Route Server infrastructure that CUDNBgpConfig
+# expects to discover, for a cluster that was not built by the
+# rosa-bgp Terraform.
+#
+# The operator discovers route servers and endpoints; it never
+# creates them. It creates only the peers, and flips SourceDestCheck
+# on the router nodes. So this fills the gap: one route server, one
+# endpoint per availability zone, associated with the cluster's VPC.
+#
+#   aws-create-route-servers --dry-run
+#   aws-create-route-servers
+#
+# Needs AWS credentials for the account owning the cluster, e.g.
+#   AWS_PROFILE=saml aws-create-route-servers
+# where the saml profile comes from aws-install-saml.
+#
+# ASN sets the Amazon-side ASN and must differ from the localASN in
+# your CUDNBgpConfig. Route server endpoints bill hourly, so tear
+# them down when you are finished.
+#
+# Rerunning adopts what already exists rather than creating a second
+# set, so it is safe as a check on the current state.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.bash"
+
+asn="${ASN:-65000}"
+
+parse_args_only_common "$@"
+require_cmd aws oc
+require_aws
+
+oc whoami >/dev/null 2>&1 || die "not connected to a cluster" \
+    "This reads the infra id and region from the running cluster." \
+    "export KUBECONFIG=<cluster>/auth/kubeconfig"
+
+infra="$(oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}')"
+region="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.aws.region}')"
+export AWS_REGION="$region"
+
+if [ -z "$infra" ] || [ -z "$region" ]; then
+    echo "Error: could not determine cluster infrastructure name or region" >&2
+    exit 1
+fi
+
+# describe-route-servers fails outright where the feature is absent,
+# which is a clearer failure than a create call half way through.
+if ! aws ec2 describe-route-servers >/dev/null 2>&1; then
+    echo "Error: VPC Route Server API unavailable in $region for this account" >&2
+    exit 1
+fi
+
+vpc="$(aws ec2 describe-vpcs \
+    --filters "Name=tag:kubernetes.io/cluster/$infra,Values=owned" \
+    --query 'Vpcs[0].VpcId' --output text)"
+
+if [ "$vpc" = "None" ] || [ -z "$vpc" ]; then
+    echo "Error: no VPC tagged kubernetes.io/cluster/$infra=owned" >&2
+    exit 1
+fi
+
+echo "Cluster:  $infra"
+echo "Region:   $region"
+echo "VPC:      $vpc"
+echo "Amazon-side ASN: $asn"
+echo
+
+# Reusing an ASN is legal and usually harmless: a route server only
+# peers inside its own VPC, so two clusters in two VPCs never see each
+# other's advertisements. It stops being harmless the moment those VPCs
+# are peered or joined through a Transit Gateway, because BGP discards
+# any route whose AS_PATH already contains the receiver's own ASN. Two
+# clusters on one ASN would then drop each other's routes silently,
+# which is a miserable thing to debug months later.
+#
+# So warn and continue rather than refuse. You may well mean it.
+clash="$(aws ec2 describe-route-servers \
+    --query "RouteServers[?State!='deleted' && AmazonSideAsn==\`$asn\`].[RouteServerId,Tags[?Key=='Name']|[0].Value]" \
+    --output text 2>/dev/null | grep -v "$infra" || true)"
+if [ -n "$clash" ]; then
+    warn "ASN $asn is already used by another route server in $region:"
+    printf '%s\n' "$clash" | sed 's/^/  /' >&2
+    warn "Fine while the VPCs stay separate. If they are ever peered or"
+    warn "joined by a Transit Gateway, routes will be silently discarded."
+    warn "Set ASN=<other> to avoid it. The private range is 64512-65534,"
+    warn "and it must differ from localASN in your CUDNBgpConfig."
+    echo
+fi
+
+# One endpoint per AZ, so take the first private subnet in each.
+subnets=""
+seen_azs=""
+while read -r subnet az; do
+    [ -n "$subnet" ] || continue
+    case " $seen_azs " in *" $az "*) continue ;; esac
+    seen_azs="$seen_azs $az"
+    subnets="$subnets $subnet:$az"
+done < <(aws ec2 describe-subnets \
+    --filters "Name=vpc-id,Values=$vpc" "Name=tag:Name,Values=*private*" \
+    --query 'Subnets[].[SubnetId,AvailabilityZone]' --output text | sort -k2)
+
+if [ -z "$subnets" ]; then
+    echo "Error: no private subnets found in $vpc" >&2
+    exit 1
+fi
+
+echo "Private subnets, one per AZ:"
+for entry in $subnets; do
+    echo "  ${entry#*:}  ${entry%%:*}"
+done
+echo
+
+# Tag filter server-side, state filter client-side: a deleted route
+# server keeps its tag and keeps being returned, so matching on the tag
+# alone adopts a tombstone, and every call against it then fails with
+# IncorrectState.
+rs="$(aws ec2 describe-route-servers \
+    --filters "Name=tag:Name,Values=$infra-rs" \
+    --query "RouteServers[?State!='deleted' && State!='deleting'].RouteServerId | [0]" \
+    --output text 2>/dev/null || echo None)"
+
+if [ "$rs" != "None" ] && [ -n "$rs" ]; then
+    echo "Adopting existing route server $rs"
+else
+    echo "Creating route server..."
+    if [ "$dry_run" = true ]; then
+        echo "  would run: aws ec2 create-route-server --amazon-side-asn $asn --tag-specifications ResourceType=route-server,Tags=[{Key=Name,Value=$infra-rs}]"
+        rs="rs-DRYRUN"
+    else
+        rs="$(aws ec2 create-route-server \
+            --amazon-side-asn "$asn" \
+            --tag-specifications "ResourceType=route-server,Tags=[{Key=Name,Value=$infra-rs}]" \
+            --query 'RouteServer.RouteServerId' --output text)"
+        echo "  created $rs"
+        aws ec2 wait route-server-available --route-server-ids "$rs" 2>/dev/null || true
+    fi
+fi
+
+associated="$(aws ec2 get-route-server-associations \
+    --route-server-id "$rs" \
+    --query "RouteServerAssociations[?VpcId=='$vpc'].VpcId" \
+    --output text 2>/dev/null || echo "")"
+
+if [ -n "$associated" ] && [ "$associated" != "None" ]; then
+    echo "Already associated with $vpc"
+else
+    echo "Associating $rs with $vpc..."
+    try aws ec2 associate-route-server --route-server-id "$rs" --vpc-id "$vpc"
+fi
+echo
+
+for entry in $subnets; do
+    subnet="${entry%%:*}"
+    az="${entry#*:}"
+
+    # DescribeRouteServerEndpoints rejects route-server-id and
+    # subnet-id as filters, so select client-side instead. State
+    # filtered like the route server adoption above: a deleted endpoint
+    # keeps being returned, and adopting the tombstone here means
+    # "already exists" for an endpoint that never gets recreated.
+    existing="$(aws ec2 describe-route-server-endpoints \
+        --query "RouteServerEndpoints[?RouteServerId=='$rs' && SubnetId=='$subnet' && State!='deleted' && State!='deleting'].RouteServerEndpointId | [0]" \
+        --output text 2>/dev/null || echo None)"
+
+    if [ "$existing" != "None" ] && [ -n "$existing" ]; then
+        echo "$az: endpoint $existing already exists"
+        continue
+    fi
+
+    echo "$az: creating endpoint in $subnet..."
+    try aws ec2 create-route-server-endpoint \
+        --route-server-id "$rs" \
+        --subnet-id "$subnet" \
+        --tag-specifications "ResourceType=route-server-endpoint,Tags=[{Key=Name,Value=$infra-rs-$az}]"
+done
+
+echo
+if [ "$dry_run" = true ]; then
+    echo "Dry run only, nothing was created."
+    exit 0
+fi
+
+# Predicate for wait_until. Deleted tombstones are excluded: AWS keeps
+# returning them, and counting one as not-yet-available would make a
+# rerun wait out the whole timeout on an endpoint nothing can revive.
+# An API failure is a failed poll, not an empty answer.
+endpoints_available() {
+    local pending
+    pending="$(aws ec2 describe-route-server-endpoints \
+        --query "length(RouteServerEndpoints[?RouteServerId=='$1' && State!='available' && State!='deleted'])" \
+        --output text 2>/dev/null)" || return 1
+    [ "$pending" = "0" ]
+}
+
+# The endpoint records carry no AvailabilityZone, only SubnetId.
+print_endpoints() {
+    aws ec2 describe-route-server-endpoints \
+        --query "RouteServerEndpoints[?RouteServerId=='$rs'].[SubnetId,RouteServerEndpointId,EniAddress,State]" \
+        --output table
+}
+
+echo "Waiting for endpoints to become available..."
+if ! wait_until 600 10 "endpoints to become available" endpoints_available "$rs"; then
+    print_endpoints
+    die "endpoints are not all available; their states are in the table above" \
+        "Endpoints bill hourly. If you are abandoning this, tear them down:" \
+        "aws-delete-route-servers"
+fi
+
+print_endpoints
+
+cat <<EOF
+
+Put this in your CUDNBgpConfig:
+
+  spec:
+    aws:
+      region: $region
+      routeServerIDs:
+        - $rs
+
+Still needed before the operator can reconcile: label the router
+nodes with the key your spec.routerNodeSelector uses, e.g.
+
+  oc label node <node> bgp_router=true
+EOF

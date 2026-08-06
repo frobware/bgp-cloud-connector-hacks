@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+#
+# Show every route server in a region, with its endpoints, VPC
+# associations and peers.
+#
+#   aws-list-route-servers
+#   aws-list-route-servers --all
+#   AWS_REGION=us-west-2 aws-list-route-servers
+#
+# Deliberately account-wide rather than scoped to your cluster. These
+# are VPC resources that outlive the clusters they were made for, and
+# they bill by the hour, so the useful question is "what is running
+# here that nobody owns any more" rather than "what did I make".
+# Anything whose VPC has gone is flagged as orphaned.
+#
+# AWS keeps returning route servers, endpoints and peers long after they
+# are deleted. Those tombstones cannot be acted on and quickly outnumber
+# everything else, so they are hidden by default and counted rather than
+# dropped in silence. --all shows them.
+#
+# Read-only.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.bash"
+
+show_all=false
+case "${1:-}" in
+    --all) show_all=true ;;
+    "") ;;
+    *) echo "Usage: ${0##*/} [--all]" >&2; exit 1 ;;
+esac
+
+# jq clause dropping tombstones, or keeping everything with --all.
+if [ "$show_all" = true ]; then
+    live='true'
+else
+    live='.State != "deleted"'
+fi
+
+require_cmd aws jq
+require_aws
+
+if [ -z "${AWS_REGION:-}" ]; then
+    AWS_REGION="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.aws.region}' 2>/dev/null || true)"
+fi
+if [ -z "$AWS_REGION" ]; then
+    echo "Error: set AWS_REGION, or connect to a cluster to borrow its region" >&2
+    exit 1
+fi
+export AWS_REGION
+
+# Empty if no cluster is reachable, which is fine; it only decides
+# whether a route server gets flagged as this cluster's.
+mine="$(oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}' 2>/dev/null || true)"
+
+echo "Region:  $AWS_REGION"
+echo "Account: $(aws sts get-caller-identity --query Account --output text)"
+echo
+
+# One describe per resource type, joined client-side with jq. The
+# describe calls reject route-server-id as a filter anyway, so asking
+# again per server and per endpoint was pure overhead: two extra round
+# trips for every resource where three in total carry everything. Only
+# the associations lack a bulk call, so those stay per server.
+servers_json="$(aws ec2 describe-route-servers --output json)"
+
+servers="$(jq -r ".RouteServers[] | select($live) | .RouteServerId" <<<"$servers_json")"
+hidden_rs="$(jq '[.RouteServers[] | select(.State == "deleted")] | length' <<<"$servers_json")"
+
+if [ -z "$servers" ]; then
+    echo "No live route servers."
+    [ "$show_all" = false ] && [ "$hidden_rs" != "0" ] && \
+        echo "($hidden_rs deleted, hidden; --all to show)"
+    exit 0
+fi
+
+endpoints_json="$(aws ec2 describe-route-server-endpoints --output json)"
+peers_json="$(aws ec2 describe-route-server-peers --output json)"
+
+# Every VPC in the region, once, for the orphan check. describe-vpcs
+# --vpc-ids with a deleted id fails outright rather than returning the
+# survivors, so the alternative is one existence probe per association,
+# which is the per-item shape again.
+all_vpcs="$(aws ec2 describe-vpcs --query 'Vpcs[].VpcId' --output text | tr '\t' '\n')"
+vpc_exists() { printf '%s\n' "$all_vpcs" | grep -qx "$1"; }
+
+for rs in $servers; do
+    read -r asn state name <<<"$(jq -r --arg rs "$rs" \
+        '.RouteServers[] | select(.RouteServerId == $rs)
+         | [.AmazonSideAsn, .State, ((.Tags // []) | map(select(.Key == "Name"))[0].Value // "")]
+         | @tsv' <<<"$servers_json")"
+
+    marker=""
+    if [ -n "$mine" ] && [ "$name" = "$mine-rs" ]; then
+        marker="   <- this cluster"
+    fi
+
+    echo "$rs  asn=$asn  state=$state  name=${name:-<untagged>}$marker"
+
+    vpcs="$(aws ec2 get-route-server-associations --route-server-id "$rs" \
+        --query 'RouteServerAssociations[].VpcId' --output text 2>/dev/null || true)"
+
+    if [ -z "$vpcs" ]; then
+        echo "    associations: none"
+    fi
+    for v in $vpcs; do
+        if vpc_exists "$v"; then
+            echo "    vpc $v"
+        else
+            echo "    vpc $v  (GONE - orphaned)"
+        fi
+    done
+
+    endpoints="$(jq -r --arg rs "$rs" \
+        ".RouteServerEndpoints[] | select(.RouteServerId == \$rs) | select($live) | .RouteServerEndpointId" \
+        <<<"$endpoints_json")"
+
+    if [ -z "$endpoints" ]; then
+        echo "    endpoints: none"
+    fi
+    for e in $endpoints; do
+        read -r subnet eni est <<<"$(jq -r --arg e "$e" \
+            '.RouteServerEndpoints[] | select(.RouteServerEndpointId == $e)
+             | [.SubnetId, .EniAddress // "None", .State] | @tsv' <<<"$endpoints_json")"
+        echo "    endpoint $e  $subnet  $eni  $est"
+
+        while read -r pid paddr pstate; do
+            [ -n "$pid" ] || continue
+            echo "      peer $pid  $paddr  $pstate"
+        done <<<"$(jq -r --arg e "$e" \
+            ".RouteServerPeers[] | select(.RouteServerEndpointId == \$e) | select($live)
+             | [.RouteServerPeerId, .PeerAddress // \"None\", .State] | @tsv" <<<"$peers_json")"
+    done
+    echo
+done
+
+if [ "$show_all" = false ]; then
+    dead_ep="$(jq '[.RouteServerEndpoints[] | select(.State == "deleted")] | length' <<<"$endpoints_json")"
+    dead_peer="$(jq '[.RouteServerPeers[] | select(.State == "deleted")] | length' <<<"$peers_json")"
+    if [ "$hidden_rs" != "0" ] || [ "$dead_ep" != "0" ] || [ "$dead_peer" != "0" ]; then
+        echo "Hidden: $hidden_rs deleted route server(s), $dead_ep endpoint(s), $dead_peer peer(s). --all to show."
+    fi
+fi

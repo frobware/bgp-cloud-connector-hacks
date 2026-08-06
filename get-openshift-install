@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+#
+# Fetch openshift-install into bin/, and tell you where it went.
+#
+#   get-openshift-install                 # newest in the default channel
+#   OCP_CHANNEL=stable-4.21 get-openshift-install
+#   OCP_VERSION=4.22.8 get-openshift-install
+#
+# No aws- prefix: openshift-install is the same binary whichever cloud
+# you point it at, so prefixing it would make the convention decoration
+# rather than information.
+#
+# The version matters more than it looks. ccoctl has to come out of the
+# same release payload as the installer that will consume its output,
+# which is why aws-create-cluster extracts ccoctl keyed on
+# "openshift-install version" rather than taking whatever is on PATH.
+#
+# Environment:
+#
+#   OCP_CHANNEL   default stable-4.22
+#   OCP_VERSION   exact version, overrides the channel lookup
+#   BIN_DIR       default bin/ in this repo
+#   ARCH          default from uname, mapped to the mirror's naming
+
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+source "$here/lib.bash"
+
+print_version_only=false
+parse_common_args "$@"
+for arg in "${rest[@]+"${rest[@]}"}"; do
+    case "$arg" in
+        # aws-create-cluster needs the version before the directory
+        # exists, to put it in the directory name. Resolving the channel
+        # lives here, so it answers rather than being duplicated.
+        --print-version) print_version_only=true ;;
+        *) die "unknown option: $arg" \
+               "Usage: ${0##*/} [--dry-run] [--print-version]" ;;
+    esac
+done
+
+require_cmd curl tar
+
+channel="${OCP_CHANNEL:-stable-4.22}"
+bin_dir="${BIN_DIR:-$here/bin}"
+
+case "${ARCH:-$(uname -m)}" in
+    x86_64|amd64)  arch=x86_64 ;;
+    aarch64|arm64) arch=aarch64 ;;
+    *) die "unsupported architecture: $(uname -m)" ;;
+esac
+
+base="https://mirror.openshift.com/pub/openshift-v4/${arch}/clients/ocp"
+
+if [ -n "${OCP_VERSION:-}" ]; then
+    tarball="openshift-install-linux-${OCP_VERSION}.tar.gz"
+    url="$base/${OCP_VERSION}/$tarball"
+else
+    # The channel directory holds exactly one installer tarball, named
+    # for the version it contains. Ask rather than guess.
+    # Not in query mode: info writes to stdout, and the caller is
+    # substituting our stdout into a directory name.
+    [ "$print_version_only" = true ] || info "Resolving newest release in $channel..."
+    tarball="$(curl -sSL --max-time 60 "$base/$channel/" \
+        | grep -oE 'openshift-install-linux-[0-9.]+\.tar\.gz' | sort -u | head -1)" \
+        || die "could not read $base/$channel/"
+    [ -n "$tarball" ] || die "no installer tarball in channel $channel" \
+        "Check the channel name; stable-4.22 and latest-4.22 both exist."
+    url="$base/$channel/$tarball"
+fi
+
+version="${tarball#openshift-install-linux-}"
+version="${version%.tar.gz}"
+
+# Just the answer, on stdout, nothing else. Callers use it in a
+# directory name, so any decoration would end up in the path.
+if [ "$print_version_only" = true ]; then
+    printf '%s\n' "$version"
+    exit 0
+fi
+
+# No version suffix. BIN_DIR is normally a cluster's own bin/, which
+# holds exactly one version for the life of that cluster, so the name
+# can just say what it is. Suffixing would only earn its keep in a
+# shared bin/, and a shared bin/ is what we are deliberately not doing:
+# a cluster directory that carries its own tools can never be broken by
+# a later install replacing them.
+target="$bin_dir/openshift-install"
+
+if [ -x "$target" ] && [ "$("$target" version 2>/dev/null | head -1 | awk '{print $2}')" = "$version" ]; then
+    info "openshift-install $version already in $bin_dir"
+    exit 0
+fi
+
+if [ "$dry_run" = true ]; then
+    info "  would download $url"
+    info "  would install  $target"
+    report
+    exit $?
+fi
+
+mkdir -p "$bin_dir"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+info "Downloading $version..."
+retry 3 5 curl -sSL --max-time 600 -o "$tmp/oi.tar.gz" "$url" \
+    || die "download failed: $url"
+
+tar xzf "$tmp/oi.tar.gz" -C "$tmp" openshift-install \
+    || die "no openshift-install inside $tarball"
+
+install -m 755 "$tmp/openshift-install" "$target"
+
+# The release image line is what everything downstream parses, so make
+# sure it is there rather than discovering it is not three steps later.
+"$target" version | grep -q 'release image' \
+    || die "$target runs but reports no release image"
+
+info ""
+"$target" version | sed 's/^/  /'
+info ""
+info "Use it with: OPENSHIFT_INSTALL=$target"
+report
