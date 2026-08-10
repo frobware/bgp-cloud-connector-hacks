@@ -91,9 +91,12 @@ fi
 if [ -z "$cluster_name" ] || [ -z "$infra" ]; then
     metadata="${CLUSTER:-}/metadata.json"
     if [ -n "${CLUSTER:-}" ] && [ -f "$metadata" ]; then
-        [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName' "$metadata")"
-        [ -n "$infra" ] || infra="$(jq -r '.infraID' "$metadata")"
-        : "${AWS_REGION:=$(jq -r '.aws.region' "$metadata")}"
+        # // empty, or jq hands back the literal string "null" for a
+        # missing key, which passes every -z/-n gate: a partial
+        # metadata.json then sends phase 3 to ccoctl delete --name null.
+        [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName // empty' "$metadata")"
+        [ -n "$infra" ] || infra="$(jq -r '.infraID // empty' "$metadata")"
+        : "${AWS_REGION:=$(jq -r '.aws.region // empty' "$metadata")}"
     fi
 fi
 

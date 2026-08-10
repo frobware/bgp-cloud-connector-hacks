@@ -286,7 +286,13 @@ record_infra_id() {
         return 1
     fi
     local infra
-    infra="$(jq -r '.infraID' "$md")"
+    # // empty, or a metadata.json without the key would persist the
+    # literal infra_id=null into the facts file teardown trusts.
+    infra="$(jq -r '.infraID // empty' "$md")"
+    if [ -z "$infra" ]; then
+        warn "  metadata.json carries no infraID"
+        return 1
+    fi
     printf 'infra_id=%s\n' "$infra" >> "$(facts_file)"
     info "  recorded infra_id=$infra"
 }

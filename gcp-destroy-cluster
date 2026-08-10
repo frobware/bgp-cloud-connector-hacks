@@ -66,9 +66,12 @@ fi
 if [ -z "$cluster_name" ] || [ -z "$infra" ]; then
     metadata="${CLUSTER:-}/metadata.json"
     if [ -n "${CLUSTER:-}" ] && [ -f "$metadata" ]; then
-        [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName' "$metadata")"
-        [ -n "$infra" ] || infra="$(jq -r '.infraID' "$metadata")"
-        : "${GCP_PROJECT:=$(jq -r '.gcp.projectID' "$metadata")}"
+        # // empty, or jq hands back the literal string "null" for a
+        # missing key, which passes every -z/-n gate and ends with
+        # filters hunting resources named null-*.
+        [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName // empty' "$metadata")"
+        [ -n "$infra" ] || infra="$(jq -r '.infraID // empty' "$metadata")"
+        : "${GCP_PROJECT:=$(jq -r '.gcp.projectID // empty' "$metadata")}"
     fi
 fi
 
