@@ -112,8 +112,11 @@ config_is_yaml() { python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1])
 # bootstrap the same way the AWS trap does -- Secrets that never
 # arrive, retried forever. If you genuinely want Manual on GCP, that
 # is the ccoctl gcp dance, and this script does not do it.
+# The optional quote matters: YAML accepts Manual, "Manual" and
+# 'Manual' alike, and a pattern that only knows the bare spelling
+# waves the quoted ones through as though the field were absent.
 config_not_manual() {
-    ! grep -qE '^credentialsMode:[[:space:]]*Manual' "$1"
+    ! grep -qE '^credentialsMode:[[:space:]]*['"'"'"]?Manual' "$1"
 }
 
 config_has_pull_secret() { grep -q '^pullSecret:' "$1"; }

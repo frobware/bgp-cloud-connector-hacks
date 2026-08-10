@@ -149,8 +149,11 @@ aws_profile_is_exported() { [ -n "${AWS_PROFILE:-}" ]; }
 
 config_is_yaml() { python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$1"; }
 
+# The optional quote matters: YAML accepts Manual, "Manual" and
+# 'Manual' alike, and a pattern that only knows the bare spelling
+# rejects a config that is in fact correct.
 config_has_manual_credentials() {
-    grep -qE '^credentialsMode:[[:space:]]*Manual' "$1"
+    grep -qE '^credentialsMode:[[:space:]]*['"'"'"]?Manual' "$1"
 }
 
 config_has_pull_secret() { grep -q '^pullSecret:' "$1"; }
