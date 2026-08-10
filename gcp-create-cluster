@@ -136,10 +136,16 @@ dns_zone_exists() { [ -n "$(zone_for_domain "$1" "$2")" ]; }
 # The GCP analogue of the AWS OIDC-bucket check: records for
 # api.<name>.<domain> mean this name is in use, or was and its destroy
 # never finished.
+#
+# Both of these fail closed. The listing's status is tested before its
+# output, because otherwise a disabled API, a missing permission or a
+# transient error yields no output, reads as "free", and the collision
+# it was meant to catch surfaces twenty minutes into the install
+# instead -- the late failure this preflight exists to prevent.
 api_records_free() {
     local project="$1" zone="$2" fqdn="$3" n
     n="$(gcloud dns record-sets list --project "$project" --zone "$zone" \
-        --name "$fqdn." --format 'value(name)' 2>/dev/null)"
+        --name "$fqdn." --format 'value(name)' 2>/dev/null)" || return 1
     [ -z "$n" ]
 }
 
@@ -149,7 +155,7 @@ api_records_free() {
 service_accounts_free() {
     local n
     n="$(gcloud iam service-accounts list --project "$1" \
-        --filter "email ~ ^${2}-" --format 'value(email)' 2>/dev/null)"
+        --filter "email ~ ^${2}-" --format 'value(email)' 2>/dev/null)" || return 1
     [ -z "$n" ]
 }
 
