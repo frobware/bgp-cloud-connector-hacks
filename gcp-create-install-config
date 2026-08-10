@@ -19,17 +19,17 @@
 # to extract, nothing to merge and nothing created before the
 # installer runs.
 #
-# BASE_DOMAIN is discovered, not defaulted. The AWS script can bake
+# GCP_BASE_DOMAIN is discovered, not defaulted. The AWS script can bake
 # qe.devcluster.openshift.com in because that zone is a fixture of the
 # QE account; the GCP project's zone name was not verifiable when this
 # was written, and an unverified constant is a trap. If the project
 # has exactly one public Cloud DNS zone, that is the answer;
-# otherwise set BASE_DOMAIN and the error lists the candidates.
+# otherwise set GCP_BASE_DOMAIN and the error lists the candidates.
 #
 # Environment:
 #
 #   GCP_PROJECT             required; becomes platform.gcp.projectID
-#   BASE_DOMAIN             default: the project's only public DNS zone
+#   GCP_BASE_DOMAIN             default: the project's only public DNS zone
 #   GCP_REGION              default us-east1
 #   CONTROL_PLANE_REPLICAS  default 3
 #   WORKER_REPLICAS         default 3
@@ -65,9 +65,9 @@ ssh_key="${SSH_KEY:-$HOME/.ssh/id_ed25519.pub}"
 cluster_name="${CLUSTER_NAME:-${CLUSTER_USER:-${USER:-$(whoami)}}-$(date +%y%m%d%H%M)}"
 pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
 
-base_domain="${BASE_DOMAIN:-}"
+base_domain="${GCP_BASE_DOMAIN:-}"
 if [ -z "$base_domain" ]; then
-    # Discovery needs a working gcloud login; a supplied BASE_DOMAIN
+    # Discovery needs a working gcloud login; a supplied GCP_BASE_DOMAIN
     # does not, which also keeps --dry-run possible offline.
     require_gcp
     zones="$(gcloud dns managed-zones list --project "$GCP_PROJECT" \
@@ -80,11 +80,11 @@ if [ -z "$base_domain" ]; then
         0)
             die "no public Cloud DNS zone in $GCP_PROJECT" \
                 "The installer needs one to create api.<cluster>.<domain>." \
-                "Set BASE_DOMAIN if the zone lives somewhere unexpected."
+                "Set GCP_BASE_DOMAIN if the zone lives somewhere unexpected."
             ;;
         *)
             die "$count public DNS zones in $GCP_PROJECT, say which" \
-                "Set BASE_DOMAIN to one of: $(printf '%s' "$zones" | tr '\n' ' ')"
+                "Set GCP_BASE_DOMAIN to one of: $(printf '%s' "$zones" | tr '\n' ' ')"
             ;;
     esac
 fi

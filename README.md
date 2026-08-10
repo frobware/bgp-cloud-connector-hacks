@@ -420,7 +420,7 @@ Differences worth knowing, next to AWS:
   mint-immediately-before-building ritual and no resume dance. Your
   gcloud login token can still go stale (`invalid_grant`); that only
   affects the preflight queries, and `gcloud auth login` renews it.
-- `BASE_DOMAIN` is discovered from the project's only public Cloud DNS
+- `GCP_BASE_DOMAIN` is discovered from the project's only public Cloud DNS
   zone rather than baked in. If the project grows a second zone, set
   it yourself; the error lists the candidates.
 - An install that dies before `create cluster` leaves nothing in GCP

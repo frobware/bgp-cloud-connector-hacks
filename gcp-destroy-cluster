@@ -23,7 +23,7 @@
 # Once the cluster directory is gone, name things instead:
 #
 #   CLUSTER_NAME=aim-2608101150 INFRA=aim-2608101150-abcde \
-#   GCP_PROJECT=<project> BASE_DOMAIN=<domain> gcp-destroy-cluster
+#   GCP_PROJECT=<project> GCP_BASE_DOMAIN=<domain> gcp-destroy-cluster
 #
 # Named that way it audits and does not delete. openshift-install
 # destroy drives off the directory's metadata.json, so with no
@@ -52,7 +52,7 @@ key_file="${GOOGLE_CREDENTIALS:-$HOME/.secrets/gcp-osServiceAccount.json}"
 
 cluster_name="${CLUSTER_NAME:-}"
 infra="${INFRA:-}"
-base_domain="${BASE_DOMAIN:-}"
+base_domain="${GCP_BASE_DOMAIN:-}"
 
 # cluster-facts first, metadata.json second: the facts file survives a
 # destroy that dies partway, the installer's file does not. Parsed,
