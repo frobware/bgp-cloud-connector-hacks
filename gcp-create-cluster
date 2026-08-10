@@ -269,6 +269,7 @@ write_cluster_facts() {
     cat > "$(facts_file)" <<EOF
 # Written by gcp-create-cluster. Read by gcp-destroy-cluster.
 # Survives teardown on purpose: metadata.json does not.
+cloud=gcp
 cluster_name=$cluster_name
 project=$project
 region=$region

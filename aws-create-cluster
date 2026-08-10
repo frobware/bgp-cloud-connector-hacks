@@ -366,6 +366,7 @@ write_cluster_facts() {
     cat > "$(facts_file)" <<EOF
 # Written by aws-create-cluster. Read by aws-destroy-cluster.
 # Survives teardown on purpose: metadata.json does not.
+cloud=aws
 cluster_name=$cluster_name
 ccoctl_name=$cluster_name
 region=$region

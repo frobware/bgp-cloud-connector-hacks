@@ -100,6 +100,38 @@ if [ -z "$cluster_name" ] || [ -z "$infra" ]; then
     fi
 fi
 
+# Refuse the other cloud's directory. Both clouds share the facts
+# schema and clusters/ holds them side by side, so nothing else stops
+# a tab-completion slip handing this script a GCP cluster: the shared
+# region key would land in AWS_REGION and the IAM/S3 audit would
+# vouch for a cloud it never inspected. Evidence, in order: the facts
+# file's cloud key, then whichever platform key metadata.json
+# carries, then the facts keys only one cloud writes -- ccoctl_name
+# is ours, project is GCP's -- which covers facts files from before
+# the cloud key existed. No evidence at all means proceed.
+cloud=""
+if [ -f "$facts" ]; then
+    cloud="$(read_fact "$facts" cloud)"
+fi
+if [ -z "$cloud" ] && [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
+    if jq -e '.aws' "${CLUSTER}/metadata.json" >/dev/null 2>&1; then
+        cloud=aws
+    elif jq -e '.gcp' "${CLUSTER}/metadata.json" >/dev/null 2>&1; then
+        cloud=gcp
+    fi
+fi
+if [ -z "$cloud" ] && [ -f "$facts" ]; then
+    if [ -n "$(read_fact "$facts" ccoctl_name)" ]; then
+        cloud=aws
+    elif [ -n "$(read_fact "$facts" project)" ]; then
+        cloud=gcp
+    fi
+fi
+if [ -n "$cloud" ] && [ "$cloud" != "aws" ]; then
+    die "this cluster directory belongs to $cloud" \
+        "Use ${cloud}-destroy-cluster instead."
+fi
+
 # Only the cluster name is indispensable: it keys the ccoctl residue,
 # which exists from the moment run_ccoctl starts. The infra id does not
 # exist until "create cluster" has run, so an install that died before

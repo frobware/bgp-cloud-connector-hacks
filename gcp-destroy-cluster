@@ -75,6 +75,39 @@ if [ -z "$cluster_name" ] || [ -z "$infra" ]; then
     fi
 fi
 
+# Refuse the other cloud's directory. Both clouds share the facts
+# schema and clusters/ holds them side by side, so nothing else stops
+# a tab-completion slip handing this script an AWS cluster: the
+# shared region key would feed the audit and the named installer
+# would be asked to destroy a cluster it can genuinely find.
+# Evidence, in order: the facts file's cloud key, then whichever
+# platform key metadata.json carries, then the facts keys only one
+# cloud writes -- ccoctl_name is AWS's, project is ours -- which
+# covers facts files from before the cloud key existed. No evidence
+# at all means proceed.
+cloud=""
+if [ -f "$facts" ]; then
+    cloud="$(read_fact "$facts" cloud)"
+fi
+if [ -z "$cloud" ] && [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
+    if jq -e '.gcp' "${CLUSTER}/metadata.json" >/dev/null 2>&1; then
+        cloud=gcp
+    elif jq -e '.aws' "${CLUSTER}/metadata.json" >/dev/null 2>&1; then
+        cloud=aws
+    fi
+fi
+if [ -z "$cloud" ] && [ -f "$facts" ]; then
+    if [ -n "$(read_fact "$facts" ccoctl_name)" ]; then
+        cloud=aws
+    elif [ -n "$(read_fact "$facts" project)" ]; then
+        cloud=gcp
+    fi
+fi
+if [ -n "$cloud" ] && [ "$cloud" != "gcp" ]; then
+    die "this cluster directory belongs to $cloud" \
+        "Use ${cloud}-destroy-cluster instead."
+fi
+
 if [ -z "$cluster_name" ]; then
     echo "Error: no cluster name in cluster-facts, metadata.json or CLUSTER_NAME" >&2
     echo "Set CLUSTER to the cluster directory, or name them directly:" >&2
