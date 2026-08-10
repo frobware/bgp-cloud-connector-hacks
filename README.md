@@ -365,20 +365,56 @@ arrive through `credential_process` with an `Expiration` attached, and
 `aws-saml.py` writes neither. So this runs `aws-saml.py`, reads back the
 profile it wrote, and emits it as JSON with an expiry.
 
+Build it once, then point a profile at the binary:
+
+```
+go build -o ~/.local/bin/aws-credential-process ./cmd/aws-credential-process
+```
+
 ```
 [profile saml-refresh]
 region = us-east-2
-credential_process = go run github.com/frobware/bgp-cloud-connector-hacks/cmd/aws-credential-process
+credential_process = /home/you/.local/bin/aws-credential-process
 ```
 
-The profile name must differ from the one `aws-saml.py` writes into, or
-the static credentials win.
+Two things about that stanza. The profile name must differ from the one
+`aws-saml.py` writes into, or the static credentials win. And the path
+has to be absolute: `credential_process` does not expand `~`, and a
+tilde fails with `No such file or directory` quoting the literal path,
+which reads like a missing binary rather than a quoting problem.
+
+Use it by exporting `AWS_PROFILE=saml-refresh` instead of `saml`.
+Nothing else changes.
 
 It caches. The SDK invokes `credential_process` per client, so without a
 cache every `aws` call would re-run `aws-saml.py` and hit Kerberos.
 Credentials are persisted with their expiry under
 `${XDG_CACHE_HOME}/aws-credential-process` and only re-minted within ten
 minutes of expiring.
+
+### What it was measured doing
+
+Verified 2026-08-10 against the QE account with the restricted role.
+
+From a cold cache and a session that had genuinely expired -- the
+static profile was returning `InvalidClientTokenId` -- a call through
+`saml-refresh` returned a valid identity in under three seconds and
+wrote a cache entry carrying an `Expiration` an hour out. A second call
+returned the same identity without touching the cache file, so
+`aws-saml.py` did not run and Kerberos was not hit. With the cached
+expiry rewritten to five minutes out, inside the ten-minute refresh
+window, the next call re-minted and recorded a fresh hour.
+
+That establishes the provider refreshes. It does not by itself prove
+`openshift-install` picks a refresh up mid-run: that is how the SDK is
+documented to behave with a `credential_process` provider, and the
+proof would be an install that outlives its first session.
+
+One assumption is worth knowing. The `Expiration` is computed locally
+as invocation time plus the requested duration, not read back from AWS.
+That is exact while the role caps at the 3600 seconds we ask for, but
+if a role ever granted less than requested, the recorded expiry would
+be optimistic and the refresh would fire too late.
 
 ## GCP
 
