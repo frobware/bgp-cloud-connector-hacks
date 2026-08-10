@@ -4,11 +4,11 @@ Scaffolding for developing bgp-cloud-connector against a real cloud,
 until the rosa-bgp Terraform is available and most of this can be
 deleted.
 
-Everything here is prefixed by cloud. `aws-` today; `gcp-` and
-`azure-` when those land. `lib.bash` is shared and deliberately knows
-nothing about any particular cloud, except for `require_aws` at the
-bottom, which moves to an `aws-lib.bash` the moment there is a second
-cloud to justify the split.
+Everything here is prefixed by cloud: `aws-` and `gcp-` today,
+`azure-` when it lands. `lib.bash` is shared and deliberately knows
+nothing about any particular cloud; `aws-lib.bash` and `gcp-lib.bash`
+layer the cloud-specific helpers on top, and scripts source the lib
+for their cloud.
 
 ## Getting started
 
@@ -62,6 +62,7 @@ out from the error.
 | | |
 |:---|:---|
 | `lib.bash` | Shared helpers. Source it, do not run it. |
+| `aws-lib.bash`, `gcp-lib.bash` | Cloud-specific helpers layered over `lib.bash` |
 | `aws-install-saml` | Builds `~/.venvs/aws-saml` and installs Red Hat's `aws-saml.py`. Rerun it after a Python bump, since the venv points into the Nix store without a GC root. |
 | `aws-login` | Mints credentials into the `saml` profile, skipping if the current ones still work |
 | `get-openshift-install` | Fetches `openshift-install` from the mirror. No `aws-` prefix: it is the same binary whichever cloud you point it at. |
@@ -72,6 +73,10 @@ out from the error.
 | `aws-delete-route-servers` | Tears them down again |
 | `aws-destroy-cluster` | Full teardown, including what `openshift-install destroy` leaves behind |
 | `cmd/aws-credential-process` | Credentials that refresh themselves. See below. |
+| `gcp-installer-credentials` | One-time: the service account and key `openshift-install` needs |
+| `gcp-create-cluster` | Builds a GCP cluster. Same shape as the AWS one, minus the credential dance. |
+| `gcp-create-install-config` | Writes a GCP install-config.yaml |
+| `gcp-destroy-cluster` | Teardown, plus a check that destroy really took everything |
 
 Everything that touches the cloud takes `--dry-run`, and nothing
 prompts. These are meant to be free-range: they do what you asked
@@ -374,6 +379,62 @@ cache every `aws` call would re-run `aws-saml.py` and hit Kerberos.
 Credentials are persisted with their expiry under
 `${XDG_CACHE_HOME}/aws-credential-process` and only re-minted within ten
 minutes of expiring.
+
+## GCP
+
+The same shape, minus the credential dance. The AWS account's
+restricted role forces `credentialsMode: Manual`, and Manual is what
+drags in ccoctl, credential-request extraction, the feature-gate
+filter and manifest merging. The GCP project grants Owner, so the
+installer's default mint mode holds: the cloud credential operator
+creates per-component service accounts itself, keyed on the infra id,
+and deletes them again on destroy. `gcp-create-cluster` is
+`aws-create-cluster` with that whole middle removed.
+
+One-time setup. The installer wants a service-account key, not your
+gcloud login, because mint mode embeds the credential in the cluster:
+
+```
+gcloud auth login                  # your own login, for the preflight queries
+export GCP_PROJECT=<project-id>    # .envrc.local, like the AWS account id
+gcp-installer-credentials          # service account + key, idempotent
+```
+
+Then the same rhythm as AWS:
+
+```
+PULL_SECRET=$HOME/.secrets/pull-secret.json \
+SSH_KEY=$HOME/.ssh/id_ed25519.pub \
+  gcp-create-cluster --dry-run
+
+PULL_SECRET=$HOME/.secrets/pull-secret.json \
+SSH_KEY=$HOME/.ssh/id_ed25519.pub \
+  gcp-create-cluster
+
+CLUSTER=clusters/gcp-<dir> gcp-destroy-cluster
+```
+
+Differences worth knowing, next to AWS:
+
+- No session race. Service-account keys do not expire, so there is no
+  mint-immediately-before-building ritual and no resume dance. Your
+  gcloud login token can still go stale (`invalid_grant`); that only
+  affects the preflight queries, and `gcloud auth login` renews it.
+- `BASE_DOMAIN` is discovered from the project's only public Cloud DNS
+  zone rather than baked in. If the project grows a second zone, set
+  it yourself; the error lists the candidates.
+- An install that dies before `create cluster` leaves nothing in GCP
+  at all. Mint mode creates nothing up front, so there is no ccoctl
+  residue and no OIDC-bucket collision to preflight for. The analogous
+  check is DNS records for `api.<name>.<domain>` and leftover service
+  accounts named for the cluster.
+- Cluster directories are `clusters/gcp-<YYMMDDHHMM>-<version>`:
+  `clusters/` mixes clouds now, and the prefix says which teardown
+  script a directory wants.
+- No route servers yet. The GCP analogue is Cloud Router, and that
+  side arrives with the bgp-cloud-connector work;
+  [rh-mobb/osd-gcp-cudn-routing](https://github.com/rh-mobb/osd-gcp-cudn-routing)
+  is the prototype to mine.
 
 ## Why bash, mostly
 
