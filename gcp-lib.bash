@@ -22,6 +22,23 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.bash"
 # id, it is not exactly a secret but it is nobody else's business, so
 # it lives in .envrc.local (which .gitignore keeps uncommitted), not
 # here.
+# The managed zone serving a domain, by name, public zones only.
+# Split-horizon projects hold public and private zones for the same
+# dnsName, and the installs here publish externally, so collision
+# checks and audits must look at the public one -- an unfiltered
+# lookup with head -1 picks arbitrarily. Prints the zone name, or
+# nothing when no public zone serves the domain. Fails when the
+# listing itself fails or more than one public zone matches, because
+# picking one of those silently means checking the wrong place.
+zone_for_domain() {
+    local zones
+    zones="$(gcloud dns managed-zones list --project "$1" \
+        --filter "dnsName=${2}. AND visibility=public" \
+        --format 'value(name)' 2>/dev/null)" || return 1
+    [ "$(printf '%s' "$zones" | grep -c .)" -le 1 ] || return 1
+    printf '%s' "$zones"
+}
+
 require_gcp() {
     require_cmd gcloud
     [ -n "${GCP_PROJECT:-}" ] || die "GCP_PROJECT is not set" \

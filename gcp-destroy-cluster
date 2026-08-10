@@ -195,21 +195,35 @@ else
         --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
     list_remaining "forwarding rule" gcloud compute forwarding-rules list \
         --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "bucket" bash -c \
-        "gcloud storage ls --project '$GCP_PROJECT' | grep -F 'gs://${infra}-' || true"
+    # Fetch guarded, filter separately. A single 'gcloud | grep ||
+    # true' pipeline forces status 0 whether gcloud failed or grep
+    # merely found nothing, and a listing we could not run must not
+    # read as a clean empty one.
+    buckets_matching() {
+        local out
+        out="$(gcloud storage ls --project "$GCP_PROJECT" 2>/dev/null)" || return 1
+        printf '%s\n' "$out" | grep -F "gs://${infra}-" || true
+    }
+    dns_records_matching() {
+        local out
+        out="$(gcloud dns record-sets list --project "$GCP_PROJECT" --zone "$1" \
+            --format 'value(name)' 2>/dev/null)" || return 1
+        printf '%s\n' "$out" | grep -F ".${cluster_name}.${base_domain}." || true
+    }
+
+    list_remaining "bucket" buckets_matching
 
     # DNS records for api.<name>.<domain> and *.apps.<name>.<domain>.
     # Needs the base domain; without it, say so rather than skipping
-    # in silence.
+    # in silence. zone_for_domain (gcp-lib.bash) looks at public
+    # zones only and refuses ambiguity, and the guarded assignment
+    # keeps a lookup failure from killing the script under errexit
+    # before the report prints.
     if [ -n "$base_domain" ]; then
-        zone="$(gcloud dns managed-zones list --project "$GCP_PROJECT" \
-            --filter "dnsName=${base_domain}." --format 'value(name)' 2>/dev/null | head -1)"
-        if [ -n "$zone" ]; then
-            list_remaining "dns record" bash -c \
-                "gcloud dns record-sets list --project '$GCP_PROJECT' --zone '$zone' \
-                    --format 'value(name)' | grep -F '.${cluster_name}.${base_domain}.' || true"
+        if zone="$(zone_for_domain "$GCP_PROJECT" "$base_domain")" && [ -n "$zone" ]; then
+            list_remaining "dns record" dns_records_matching "$zone"
         else
-            fail "could not find the DNS zone for $base_domain"
+            fail "could not find the public DNS zone for $base_domain"
         fi
     else
         echo "  (no base domain known, DNS records not checked)"

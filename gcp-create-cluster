@@ -128,13 +128,9 @@ config_control_plane_replicas() {
     awk '/^controlPlane:/{f=1} f&&/^  replicas:/{print $2; exit}' "$1"
 }
 
-# The zone name, not just existence: the api-record check below needs
-# it. Empty output is the failure case.
-zone_for_domain() {
-    gcloud dns managed-zones list --project "$1" \
-        --filter "dnsName=${2}." --format 'value(name)' 2>/dev/null | head -1
-}
-
+# zone_for_domain comes from gcp-lib.bash: public zones only, and it
+# refuses ambiguity, so a failed or ambiguous lookup reads as "no
+# zone" here and the check fails closed.
 dns_zone_exists() { [ -n "$(zone_for_domain "$1" "$2")" ]; }
 
 # The GCP analogue of the AWS OIDC-bucket check: records for
@@ -433,7 +429,7 @@ check "DNS zone for $base_domain"         dns_zone_exists "$project" "$base_doma
 # existence has been asserted. An empty zone here means the check
 # above already failed; the record check would then fail too, which is
 # noise, so guard it.
-zone="$(zone_for_domain "$project" "$base_domain")"
+zone="$(zone_for_domain "$project" "$base_domain")" || zone=""
 if [ -n "$zone" ]; then
     check "no DNS records for api.$cluster_name.$base_domain" \
         api_records_free "$project" "$zone" "api.$cluster_name.$base_domain"
