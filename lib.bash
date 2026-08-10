@@ -3,8 +3,8 @@
 #
 #   source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.bash"
 #
-# Nothing here is AWS-specific, so gcp- and azure- scripts can use it
-# unchanged when they arrive.
+# Nothing here is specific to any cloud. The aws- and gcp- scripts
+# layer their own helpers on top via aws-lib.bash and gcp-lib.bash.
 #
 # On error handling: scripts keep `set -euo pipefail` as a backstop for
 # the command nobody remembered to check. It is not the mechanism, it is
@@ -220,17 +220,6 @@ report() {
     return 1
 }
 
-# --- AWS ------------------------------------------------------------
-#
-# The only cloud-specific thing in here. When gcp- scripts arrive this
-# moves to aws-lib.bash and gets a gcp-lib.bash sibling; splitting now,
-# for one cloud, would be inventing a boundary before knowing where it
-# goes.
-
-require_aws() {
-    aws sts get-caller-identity >/dev/null 2>&1 && return 0
-    die "no usable AWS credentials" \
-        "Select a profile, e.g. AWS_PROFILE=saml ${0##*/}" \
-        "Available: $(aws configure list-profiles 2>/dev/null | tr '\n' ' ')" \
-        "Or mint fresh ones: aws-login --force"
-}
+# Nothing cloud-specific lives here. require_aws is in aws-lib.bash,
+# require_gcp in gcp-lib.bash; scripts source the lib for their cloud,
+# which sources this one.

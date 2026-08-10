@@ -30,6 +30,7 @@
 # whatever else you leave lying around with that prefix, which defeats
 # the entire arrangement. Adding a script costs a line here.
 !lib.bash
+!aws-lib.bash
 !aws-create-cluster
 !aws-create-install-config
 !aws-create-route-servers

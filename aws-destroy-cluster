@@ -48,7 +48,7 @@
 
 set -euo pipefail
 
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.bash"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/aws-lib.bash"
 
 parse_args_only_common "$@"
 require_cmd aws
