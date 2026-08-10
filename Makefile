@@ -5,7 +5,7 @@
 # script, so keep it out of the shell checks.
 # get-openshift-install is named by hand: it has no aws- prefix, and a
 # wildcard that missed it once let a bug ship unlinted.
-scripts := $(filter-out aws-credential-process,$(wildcard aws-*)) get-openshift-install lib.bash
+scripts := $(filter-out aws-credential-process,$(wildcard aws-*)) $(wildcard gcp-*) get-openshift-install lib.bash
 
 .DEFAULT_GOAL := check
 

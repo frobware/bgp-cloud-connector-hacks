@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+#
+# Tear down a cluster built by gcp-create-cluster.
+#
+#   CLUSTER=$PWD/clusters/gcp-2608101150-4228 gcp-destroy-cluster --dry-run
+#   CLUSTER=$PWD/clusters/gcp-2608101150-4228 gcp-destroy-cluster
+#
+# Shorter than its AWS sibling, and the difference is mint mode. On
+# AWS, ccoctl creates IAM roles, an OIDC provider and an S3 bucket
+# before the installer ever runs, all keyed on the cluster name, and
+# openshift-install destroy never learns about them. On GCP the mint
+# service accounts are keyed on the infra id and the cloud credential
+# operator deletes them during destroy, so there is no residue phase
+# -- only a "remaining" check afterwards, because trusting that claim
+# without looking is how orphans happen. Route servers have no GCP
+# equivalent yet either; the Cloud Router side arrives with the
+# bgp-cloud-connector work.
+#
+# An install that died before "create cluster" created nothing in GCP,
+# so a directory with no metadata.json and no infra id means there is
+# genuinely nothing to delete.
+#
+# Once the cluster directory is gone, name things instead:
+#
+#   CLUSTER_NAME=aim-2608101150 INFRA=aim-2608101150-abcde \
+#   GCP_PROJECT=<project> BASE_DOMAIN=<domain> gcp-destroy-cluster
+#
+# Every phase runs even if an earlier one failed; failures are
+# collected and reported at the end, and the exit status reflects
+# them. This deletes cloud resources and nothing else: the directory
+# stays, bin/ included, because yesterday's cluster is still worth
+# reading. Remove it yourself when you are finished.
+#
+# Overrides: GOOGLE_CREDENTIALS (default ~/.secrets/gcp-osServiceAccount.json),
+# OPENSHIFT_INSTALL (default: the cluster's own bin/, then PATH).
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gcp-lib.bash"
+
+parse_args_only_common "$@"
+require_cmd gcloud jq
+
+key_file="${GOOGLE_CREDENTIALS:-$HOME/.secrets/gcp-osServiceAccount.json}"
+
+cluster_name="${CLUSTER_NAME:-}"
+infra="${INFRA:-}"
+base_domain="${BASE_DOMAIN:-}"
+
+# cluster-facts first, metadata.json second: the facts file survives a
+# destroy that dies partway, the installer's file does not. Parsed,
+# not sourced, so the documented overrides above keep working.
+read_fact() {
+    awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1"
+}
+
+facts="${CLUSTER:-}/cluster-facts"
+if [ -f "$facts" ]; then
+    [ -n "$cluster_name" ] || cluster_name="$(read_fact "$facts" cluster_name)"
+    [ -n "$infra" ] || infra="$(read_fact "$facts" infra_id)"
+    [ -n "$base_domain" ] || base_domain="$(read_fact "$facts" base_domain)"
+    : "${GCP_PROJECT:=$(read_fact "$facts" project)}"
+    [ -n "$cluster_name" ] && echo "Read identifiers from $facts"
+fi
+
+if [ -z "$cluster_name" ] || [ -z "$infra" ]; then
+    metadata="${CLUSTER:-}/metadata.json"
+    if [ -n "${CLUSTER:-}" ] && [ -f "$metadata" ]; then
+        [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName' "$metadata")"
+        [ -n "$infra" ] || infra="$(jq -r '.infraID' "$metadata")"
+        : "${GCP_PROJECT:=$(jq -r '.gcp.projectID' "$metadata")}"
+    fi
+fi
+
+if [ -z "$cluster_name" ]; then
+    echo "Error: no cluster name in cluster-facts, metadata.json or CLUSTER_NAME" >&2
+    echo "Set CLUSTER to the cluster directory, or name them directly:" >&2
+    echo "  CLUSTER_NAME=<name> INFRA=<infra-id> GCP_PROJECT=<project> ${0##*/}" >&2
+    exit 1
+fi
+
+require_gcp
+
+# What the installer built under, so destroy can find its resources.
+if [ -n "${OPENSHIFT_INSTALL:-}" ]; then
+    installer="$OPENSHIFT_INSTALL"
+elif [ -x "${CLUSTER:-}/bin/openshift-install" ]; then
+    installer="$CLUSTER/bin/openshift-install"
+else
+    installer="openshift-install"
+fi
+
+echo "Project:      $GCP_PROJECT"
+echo "Cluster name: $cluster_name"
+echo "Infra id:     ${infra:-<none: the install never created the cluster>}"
+echo "Installer:    $installer"
+echo
+
+echo "Will delete:"
+if [ -n "$infra" ]; then
+    echo "  the cluster $infra, via openshift-install destroy"
+    echo "  (mint-mode service accounts go with it)"
+else
+    echo "  nothing: mint mode creates nothing before the cluster itself"
+fi
+echo
+
+# Phase 1. The cluster. Everything a GCP cluster owns hangs off the
+# infra id and destroy knows how to find it, service accounts
+# included.
+echo "--- cluster ---"
+if [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
+    if [ ! -f "$key_file" ]; then
+        fail "no installer credentials at $key_file, cannot run destroy"
+    elif ! GOOGLE_CREDENTIALS="$key_file" \
+            try "$installer" destroy cluster --dir="$CLUSTER" --log-level=info; then
+        fail "openshift-install destroy cluster"
+    fi
+else
+    echo "  no metadata.json, assuming the cluster is already gone"
+fi
+echo
+
+# Phase 2. Say what is actually left rather than trusting the above.
+# After a clean destroy every listing here comes back empty. Matching
+# is on "<infra>-", and the infra id itself starts "<name>-", so
+# nothing here can catch another cluster's resources: the timestamp in
+# the name sees to that.
+#
+# A listing that fails is recorded, not fatal: "nothing" is not a
+# claim we can make about resources we could not list.
+echo "--- remaining ---"
+if [ "$dry_run" = true ]; then
+    echo "  (skipped: nothing was deleted)"
+elif [ -z "$infra" ]; then
+    echo "  no infra id, nothing was ever created"
+else
+    remaining=""
+    list_remaining() {
+        local kind="$1"; shift
+        local out
+        if ! out="$("$@" 2>/dev/null)"; then
+            fail "could not list $kind"
+            return 0
+        fi
+        local line
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf '  %-16s %s\n' "$kind" "$line"
+            remaining=yes
+        done <<< "$out"
+    }
+
+    list_remaining "instance" gcloud compute instances list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "service account" gcloud iam service-accounts list \
+        --project "$GCP_PROJECT" --filter "email ~ ^${infra}-" --format 'value(email)'
+    list_remaining "firewall rule" gcloud compute firewall-rules list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "forwarding rule" gcloud compute forwarding-rules list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "bucket" bash -c \
+        "gcloud storage ls --project '$GCP_PROJECT' | grep -F 'gs://${infra}-' || true"
+
+    # DNS records for api.<name>.<domain> and *.apps.<name>.<domain>.
+    # Needs the base domain; without it, say so rather than skipping
+    # in silence.
+    if [ -n "$base_domain" ]; then
+        zone="$(gcloud dns managed-zones list --project "$GCP_PROJECT" \
+            --filter "dnsName=${base_domain}." --format 'value(name)' 2>/dev/null | head -1)"
+        if [ -n "$zone" ]; then
+            list_remaining "dns record" bash -c \
+                "gcloud dns record-sets list --project '$GCP_PROJECT' --zone '$zone' \
+                    --format 'value(name)' | grep -F '.${cluster_name}.${base_domain}.' || true"
+        else
+            fail "could not find the DNS zone for $base_domain"
+        fi
+    else
+        echo "  (no base domain known, DNS records not checked)"
+    fi
+
+    if [ -z "$remaining" ] && [ "$(failure_count)" -eq 0 ]; then
+        echo "  nothing"
+    elif [ -n "$remaining" ]; then
+        fail "resources remain, see above"
+    fi
+fi
+echo
+
+if [ -n "${CLUSTER:-}" ]; then
+    info "Cloud resources only. This directory is untouched, bin/ included:"
+    info "  $CLUSTER"
+    info "Remove it by hand once you no longer want the logs."
+fi
+
+report

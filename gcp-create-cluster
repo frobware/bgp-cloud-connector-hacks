@@ -1,0 +1,474 @@
+#!/usr/bin/env bash
+#
+# Build an OpenShift cluster on GCP, checking things first.
+#
+#   gcp-create-cluster --dry-run
+#   gcp-create-cluster
+#
+# The shape is aws-create-cluster's: preflight everything before
+# anything exists, one directory per cluster owning its own binaries,
+# a timestamp name you cannot choose, a facts file for teardown. What
+# is missing is the entire credential dance. The AWS account's
+# restricted role forces credentialsMode Manual, and with it ccoctl,
+# credential-request extraction, the feature-gate filter and manifest
+# merging. On GCP the service account has Owner, so the default mint
+# mode holds: the cloud credential operator creates per-component
+# service accounts itself, keyed on the infra id, and removes them on
+# destroy. Steps 3 through 8 of the AWS script simply do not exist
+# here, and neither does the AWS bootstrap trap those steps carry.
+#
+# Also missing: the session race. openshift-install consumes a
+# service-account key (GOOGLE_CREDENTIALS), and keys do not expire,
+# so there is no minting-immediately-before-building ritual. Your
+# gcloud login is only needed for the preflight queries, and
+# require_gcp says so when it has gone stale.
+#
+# Retrying means running it again. That produces a new name and a new
+# directory, so nothing from a failed attempt can leak into the next
+# one, and the failed attempt stays readable. An install that dies
+# before "create cluster" leaves nothing in GCP at all -- mint mode
+# creates nothing up front, which is exactly the residue problem the
+# AWS script needs cluster-facts and tagging to manage.
+#
+# Environment:
+#
+#   CLUSTER_USER         default $USER
+#   CLUSTER              cluster directory, default clusters/gcp-<YYMMDDHHMM>-<ocp>
+#   OPENSHIFT_INSTALL    default <cluster>/bin/openshift-install, fetched if absent
+#   OCP_CHANNEL          passed to get-openshift-install, default stable-4.22
+#   INSTALL_CONFIG       a config to copy in; the copy's metadata.name
+#                        is rewritten to the generated cluster name.
+#                        Default: generate one
+#   PULL_SECRET          default ~/.secrets/pull-secret.json
+#   GOOGLE_CREDENTIALS   service-account key for the installer,
+#                        default ~/.secrets/gcp-osServiceAccount.json
+#   GCP_PROJECT          required (gcp-lib.bash), unless INSTALL_CONFIG
+#                        already names a projectID
+
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+source "$here/gcp-lib.bash"
+
+parse_args_only_common "$@"
+
+# The name is always a timestamp, and there is deliberately no way to
+# supply one; see aws-create-cluster for the full argument. Run twice
+# inside the same minute and you collide, which is yours to resolve.
+short_name="$(date +%y%m%d%H%M)"
+cluster_user="${CLUSTER_USER:-${USER:-$(whoami)}}"
+cluster_name="$cluster_user-$short_name"
+
+# The OCP version goes in the directory name, not the cluster name,
+# same trade as on AWS: directory names are free, cluster-name
+# characters are not.
+resolve_ocp_version() {
+    if [ -n "${OPENSHIFT_INSTALL:-}" ] && [ -x "${OPENSHIFT_INSTALL:-}" ]; then
+        "$OPENSHIFT_INSTALL" version 2>/dev/null | head -1 | awk '{print $2}'
+        return 0
+    fi
+    "$here/get-openshift-install" --print-version 2>/dev/null
+}
+
+ocp_version="$(resolve_ocp_version || true)"
+
+[ -n "$ocp_version" ] || die "could not determine the OCP version" \
+    "get-openshift-install --print-version returned nothing." \
+    "Check the VPN, the mirror, and OCP_CHANNEL (currently ${OCP_CHANNEL:-stable-4.22})." \
+    "Or set OPENSHIFT_INSTALL to a binary you already have."
+
+ocp_tag="$(printf '%s' "$ocp_version" | tr -d '.')"
+
+# gcp- in the directory name, because clusters/ mixes clouds now and
+# the directory is how you tell which teardown script a cluster wants.
+cluster_dir="${CLUSTER:-$here/clusters/gcp-$short_name-$ocp_tag}"
+bin_dir="$cluster_dir/bin"
+pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
+key_file="${GOOGLE_CREDENTIALS:-$HOME/.secrets/gcp-osServiceAccount.json}"
+
+installer="${OPENSHIFT_INSTALL:-$bin_dir/openshift-install}"
+
+# ---------------------------------------------------------------------
+# Predicates. Each answers one question and says nothing about what to
+# do when the answer is no, so they compose into check and wait_until.
+# ---------------------------------------------------------------------
+
+# The installer refuses user credentials for mint mode; only a
+# service-account key can be embedded in the cluster for CCO to use.
+# Checking the type here turns "the installer failed twenty minutes
+# in" into a preflight line.
+key_is_service_account() {
+    [ "$(jq -r '.type // empty' "$key_file" 2>/dev/null)" = "service_account" ]
+}
+
+gcloud_project_ok() {
+    gcloud projects describe "$1" --format 'value(projectId)' >/dev/null 2>&1
+}
+
+config_is_yaml() { python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$1"; }
+
+# Mint is the point of this script. A config carrying Manual would
+# install with no credential manifests at all, and that wedges
+# bootstrap the same way the AWS trap does -- Secrets that never
+# arrive, retried forever. If you genuinely want Manual on GCP, that
+# is the ccoctl gcp dance, and this script does not do it.
+config_not_manual() {
+    ! grep -qE '^credentialsMode:[[:space:]]*Manual' "$1"
+}
+
+config_has_pull_secret() { grep -q '^pullSecret:' "$1"; }
+config_has_ssh_key()     { grep -q '^sshKey:' "$1"; }
+
+config_region() { grep -E '^   *region:' "$1" | awk '{print $2}' | head -1; }
+config_base_domain() { grep -E '^baseDomain:' "$1" | awk '{print $2}' | head -1; }
+config_project() {
+    awk '/^  gcp:/{f=1} f&&/^    projectID:/{print $2; exit}' "$1"
+}
+config_control_plane_replicas() {
+    awk '/^controlPlane:/{f=1} f&&/^  replicas:/{print $2; exit}' "$1"
+}
+
+# The zone name, not just existence: the api-record check below needs
+# it. Empty output is the failure case.
+zone_for_domain() {
+    gcloud dns managed-zones list --project "$1" \
+        --filter "dnsName=${2}." --format 'value(name)' 2>/dev/null | head -1
+}
+
+dns_zone_exists() { [ -n "$(zone_for_domain "$1" "$2")" ]; }
+
+# The GCP analogue of the AWS OIDC-bucket check: records for
+# api.<name>.<domain> mean this name is in use, or was and its destroy
+# never finished.
+api_records_free() {
+    local project="$1" zone="$2" fqdn="$3" n
+    n="$(gcloud dns record-sets list --project "$project" --zone "$zone" \
+        --name "$fqdn." --format 'value(name)' 2>/dev/null)"
+    [ -z "$n" ]
+}
+
+# Mint-mode service accounts are named <infra-id>-<component>, and the
+# infra id starts with the cluster name. Leftovers mean a previous
+# cluster under this name was not fully destroyed.
+service_accounts_free() {
+    local n
+    n="$(gcloud iam service-accounts list --project "$1" \
+        --filter "email ~ ^${2}-" --format 'value(email)' 2>/dev/null)"
+    [ -z "$n" ]
+}
+
+cluster_dir_free() { [ ! -e "$1/metadata.json" ]; }
+
+dir_is_empty() {
+    [ ! -d "$1" ] || [ -z "$(ls -A "$1" 2>/dev/null)" ]
+}
+
+# openshift-install caps metadata.name at 54 characters. The tighter
+# squeeze here is service-account ids, which GCP caps at 30: mint
+# names them <infra-id>-<component> and truncates, so a long cluster
+# name eats the characters that tell components apart. The infra id
+# alone adds 6. Inferred, not measured: 21 keeps the component part
+# distinguishable; timestamp names are 14 and never get near it.
+name_length_ok()   { [ ${#1} -le 54 ]; }
+name_length_sane() { [ ${#1} -le 21 ]; }
+
+config_name() { awk '/^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$1"; }
+
+name_is_rfc1123() { printf '%s' "$1" | grep -qE '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'; }
+
+config_has_name() { [ -n "$(config_name "$1")" ]; }
+
+config_name_is_valid() {
+    local n
+    n="$(config_name "$1")"
+    [ -n "$n" ] && name_is_rfc1123 "$n"
+}
+
+# ---------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------
+
+ensure_installer() {
+    if [ -x "$installer" ] && "$installer" version >/dev/null 2>&1; then
+        info "  openshift-install already in $bin_dir"
+        return 0
+    fi
+    BIN_DIR="$bin_dir" "$here/get-openshift-install"
+}
+
+config_matches_request() {
+    local f="$1" want="$2" got
+    got="$(config_name "$f")"
+    [ "$got" = "$want" ]
+}
+
+# The name is always ours, even when the config is yours; identity
+# stays the generated timestamp name because the facts file and
+# teardown's prefix matching key on it. Only the copy is renamed.
+rename_config() {
+    local f="$1" original
+    original="$(config_name "$f")"
+    [ "$original" = "$cluster_name" ] && return 0
+    # umask, because the rewrite goes through a scratch file and the
+    # pull secret is inside.
+    ( umask 077; awk -v name="$cluster_name" '
+        /^metadata:/ { in_md = 1 }
+        in_md && /^  name:/ { print "  name: " name; in_md = 0; next }
+        { print }
+    ' "$f" > "$f.renamed" )
+    mv "$f.renamed" "$f"
+    config_matches_request "$f" "$cluster_name" \
+        || die "could not rewrite metadata.name in $f" \
+            "It still names $(config_name "$f"), not $cluster_name."
+    info "  renamed metadata.name: $original -> $cluster_name"
+}
+
+prepare_config() {
+    mkdir -p "$cluster_dir"
+    local existing=""
+    [ -f "$cluster_dir/install-config.yaml.bak" ] && existing="$cluster_dir/install-config.yaml.bak"
+    [ -f "$cluster_dir/install-config.yaml" ] && existing="$cluster_dir/install-config.yaml"
+
+    if [ -n "$existing" ]; then
+        if config_matches_request "$existing" "$cluster_name"; then
+            info "  install-config already present for $cluster_name"
+            return 0
+        fi
+        die "$existing is for a different cluster" \
+            "It names $(config_name "$existing"), not $cluster_name." \
+            "Resuming would install from artefacts that do not match what you asked for." \
+            "Either pick a different short name, or remove $cluster_dir and start again."
+    fi
+    if [ -n "${INSTALL_CONFIG:-}" ]; then
+        install -m 600 "$INSTALL_CONFIG" "$cluster_dir/install-config.yaml"
+        rename_config "$cluster_dir/install-config.yaml"
+    else
+        CLUSTER_NAME="$cluster_name" PULL_SECRET="$pull_secret" \
+            "$here/gcp-create-install-config" "$cluster_dir/install-config.yaml"
+    fi
+    # create cluster consumes the original; the copy is the record of
+    # what was asked for, which the directory exists to keep.
+    cp "$cluster_dir/install-config.yaml" "$cluster_dir/install-config.yaml.bak"
+}
+
+# Everything teardown needs, in a file that nothing else deletes.
+# metadata.json is the installer's and destroy removes it on success;
+# this survives on purpose. Less critical than on AWS -- mint mode
+# leaves nothing behind pre-install -- but a destroy that dies partway
+# still wants the identifiers without grepping the console.
+facts_file() { printf '%s' "$cluster_dir/cluster-facts"; }
+
+write_cluster_facts() {
+    mkdir -p "$cluster_dir"
+    cat > "$(facts_file)" <<EOF
+# Written by gcp-create-cluster. Read by gcp-destroy-cluster.
+# Survives teardown on purpose: metadata.json does not.
+cluster_name=$cluster_name
+project=$project
+region=$region
+base_domain=$base_domain
+ocp_version=${ocp_version:-unknown}
+cluster_dir=$cluster_dir
+EOF
+    info "  wrote $(facts_file)"
+}
+
+record_infra_id() {
+    local md="$cluster_dir/metadata.json"
+    if [ ! -f "$md" ]; then
+        warn "  no metadata.json, cannot record the infra id"
+        return 1
+    fi
+    local infra
+    infra="$(jq -r '.infraID' "$md")"
+    printf 'infra_id=%s\n' "$infra" >> "$(facts_file)"
+    info "  recorded infra_id=$infra"
+}
+
+# Same file the AWS script writes: cd in and oc points here.
+write_cluster_envrc() {
+    cat > "$cluster_dir/.envrc" <<'EOF'
+# Written by gcp-create-cluster. Keeps the repo's flake shell, then
+# points oc and openshift-install at this cluster.
+source_up_if_exists
+export KUBECONFIG="$PWD/auth/kubeconfig"
+EOF
+    if command -v direnv >/dev/null 2>&1; then
+        if direnv allow "$cluster_dir" 2>/dev/null; then
+            info "  wrote and allowed $cluster_dir/.envrc"
+        else
+            info "  wrote $cluster_dir/.envrc (direnv allow failed, run it yourself)"
+        fi
+    else
+        info "  wrote $cluster_dir/.envrc (no direnv; source it or export KUBECONFIG)"
+    fi
+}
+
+create_cluster() {
+    # The installer would otherwise pick up agent keys that conflict
+    # with the cluster's own.
+    unset SSH_AUTH_SOCK
+    GOOGLE_CREDENTIALS="$key_file" \
+        "$installer" create cluster --dir="$cluster_dir" --log-level=info
+}
+
+# Conditions, never columns; see aws-create-cluster for the incident
+# that rule comes from.
+operators_total() {
+    KUBECONFIG="$cluster_dir/auth/kubeconfig" oc get co -o json 2>/dev/null \
+        | jq -r '.items | length'
+}
+
+operators_unavailable() {
+    KUBECONFIG="$cluster_dir/auth/kubeconfig" oc get co -o json 2>/dev/null \
+        | jq -r '[.items[] | select(([(.status.conditions // [])[]
+            | select(.type=="Available") | .status] | first) != "True")
+            | .metadata.name] | join(" ")'
+}
+
+all_operators_available() {
+    local bad total
+    bad="$(operators_unavailable)"
+    total="$(operators_total)"
+    [ -n "$total" ] || return 1
+    if [ -z "$bad" ]; then
+        info "  $total/$total operators Available"
+        return 0
+    fi
+    info "  waiting on: $bad"
+    return 1
+}
+
+verify_cluster() {
+    wait_until 900 30 "every cluster operator to become Available" \
+        all_operators_available \
+        || fail "some operators never became Available, see above"
+    return 0
+}
+
+# ---------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------
+
+info "Cluster:   $cluster_name"
+info "Directory: $cluster_dir"
+info "Tools:     $bin_dir (this cluster owns them)"
+info "Key file:  $key_file"
+info ""
+
+info "--- preflight ---"
+check "gcloud on PATH"                 command -v gcloud
+check "oc on PATH"                     command -v oc
+check "jq on PATH"                     command -v jq
+check "python3 on PATH"                command -v python3
+check "installer key file parses"      jq -e . "$key_file"
+check "key is a service account"       key_is_service_account
+check "pull secret readable"           jq -e . "$pull_secret"
+check "cluster directory unused"       cluster_dir_free "$cluster_dir"
+check "cluster directory is empty"     dir_is_empty "$cluster_dir"
+check "name within 54 chars"           name_length_ok "$cluster_name"
+check_warn "name leaves room for service-account ids" name_length_sane "$cluster_name"
+abort_if_failed
+
+scratch=""
+cleanup_guidance=false
+on_exit() {
+    local status=$?
+    [ -n "$scratch" ] && rm -rf "$scratch"
+    if [ "$status" -ne 0 ] && [ "$cleanup_guidance" = true ]; then
+        warn ""
+        warn "Failed partway through. To clean up whatever exists:"
+        warn "  CLUSTER=$cluster_dir gcp-destroy-cluster"
+    fi
+}
+trap on_exit EXIT
+
+# Validate the config that will actually be installed; see
+# aws-create-cluster for why a generated stand-in goes to a scratch
+# directory rather than the cluster directory.
+if [ -n "${INSTALL_CONFIG:-}" ]; then
+    config="$INSTALL_CONFIG"
+    [ -f "$config" ] || die "INSTALL_CONFIG points at $config, which does not exist"
+else
+    scratch="$(mktemp -d)"
+    CLUSTER_NAME="$cluster_name" PULL_SECRET="$pull_secret" \
+        "$here/gcp-create-install-config" "$scratch/install-config.yaml" >/dev/null
+    config="$scratch/install-config.yaml"
+fi
+
+region="$(config_region "$config")"
+base_domain="$(config_base_domain "$config")"
+project="$(config_project "$config")"
+replicas="$(config_control_plane_replicas "$config")"
+
+check "install-config parses as YAML"     config_is_yaml "$config"
+if [ -n "${INSTALL_CONFIG:-}" ]; then
+    check "config has a metadata.name to rewrite" config_has_name "$config"
+    check "generated name is RFC 1123 valid"  name_is_rfc1123 "$cluster_name"
+else
+    check "metadata.name is RFC 1123 valid"   config_name_is_valid "$config"
+fi
+check "credentialsMode is not Manual"     config_not_manual "$config"
+check "install-config has a pull secret"  config_has_pull_secret "$config"
+check "install-config has an ssh key"     config_has_ssh_key "$config"
+check "region is set"                     test -n "$region"
+check "projectID is set"                  test -n "$project"
+check "gcloud can read project $project"  gcloud_project_ok "$project"
+check "DNS zone for $base_domain"         dns_zone_exists "$project" "$base_domain"
+
+# The zone name feeds the record check, so resolve it once the zone's
+# existence has been asserted. An empty zone here means the check
+# above already failed; the record check would then fail too, which is
+# noise, so guard it.
+zone="$(zone_for_domain "$project" "$base_domain")"
+if [ -n "$zone" ]; then
+    check "no DNS records for api.$cluster_name.$base_domain" \
+        api_records_free "$project" "$zone" "api.$cluster_name.$base_domain"
+fi
+check "no service accounts named ${cluster_name}-*" \
+    service_accounts_free "$project" "$cluster_name"
+check_warn "three control-plane nodes"    test "$replicas" = "3"
+abort_if_failed
+
+if [ "$replicas" != "3" ]; then
+    warn "  control plane has $replicas node(s). Every kube-apiserver"
+    warn "  rollout will take the API down until it completes."
+fi
+info ""
+
+if [ "$dry_run" = true ]; then
+    info "Would create $cluster_name in ${region:-<from config>} (project $project)."
+    report
+    exit $?
+fi
+
+# No confirmation prompt; the preflight is the guard. --dry-run is how
+# you rehearse.
+
+cleanup_guidance=true
+
+step "openshift-install"     ensure_installer
+step "install config"        prepare_config
+# Early, so cd-ing into the directory works while the install is still
+# running rather than only once it finishes.
+step "cluster .envrc"        write_cluster_envrc
+step "cluster facts"         write_cluster_facts
+step "create cluster"        create_cluster
+# phase, not step: a cluster with a sulking operator is still a
+# cluster you want to keep and look at.
+phase "record infra id"      record_infra_id
+phase "verify operators"     verify_cluster
+
+cleanup_guidance=false
+
+info ""
+export KUBECONFIG="$cluster_dir/auth/kubeconfig"
+
+info "Cluster:    $cluster_name"
+info "Kubeconfig: $cluster_dir/auth/kubeconfig"
+info "            export KUBECONFIG=$cluster_dir/auth/kubeconfig"
+info "Password:   $cluster_dir/auth/kubeadmin-password"
+info ""
+info "Tear it down with:"
+info "  CLUSTER=$cluster_dir gcp-destroy-cluster"
+report

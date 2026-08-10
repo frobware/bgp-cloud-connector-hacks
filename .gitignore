@@ -31,6 +31,7 @@
 # the entire arrangement. Adding a script costs a line here.
 !lib.bash
 !aws-lib.bash
+!gcp-lib.bash
 !aws-create-cluster
 !aws-create-install-config
 !aws-create-route-servers
@@ -39,6 +40,10 @@
 !aws-install-saml
 !aws-list-route-servers
 !aws-login
+!gcp-create-cluster
+!gcp-create-install-config
+!gcp-destroy-cluster
+!gcp-installer-credentials
 !get-openshift-install
 
 # Go sources, wherever they live under cmd/.
