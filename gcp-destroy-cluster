@@ -59,7 +59,19 @@ if [ -f "$facts" ]; then
     [ -n "$cluster_name" ] || cluster_name="$(read_fact "$facts" cluster_name)"
     [ -n "$infra" ] || infra="$(read_fact "$facts" infra_id)"
     [ -n "$base_domain" ] || base_domain="$(read_fact "$facts" base_domain)"
-    : "${GCP_PROJECT:=$(read_fact "$facts" project)}"
+    # The facts value beats the ambient GCP_PROJECT. The README has
+    # you export GCP_PROJECT permanently, so an env-first default
+    # would leave the recorded value -- written from the
+    # install-config precisely so destroy knows where the cluster
+    # lives -- dead in practice, and the audit would inspect the
+    # wrong project and report it clean.
+    facts_project="$(read_fact "$facts" project)"
+    if [ -n "$facts_project" ]; then
+        if [ -n "${GCP_PROJECT:-}" ] && [ "$GCP_PROJECT" != "$facts_project" ]; then
+            warn "GCP_PROJECT=$GCP_PROJECT differs from the facts file's $facts_project; using $facts_project"
+        fi
+        GCP_PROJECT="$facts_project"
+    fi
     [ -n "$cluster_name" ] && echo "Read identifiers from $facts"
 fi
 
@@ -71,7 +83,15 @@ if [ -z "$cluster_name" ] || [ -z "$infra" ]; then
         # filters hunting resources named null-*.
         [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName // empty' "$metadata")"
         [ -n "$infra" ] || infra="$(jq -r '.infraID // empty' "$metadata")"
-        : "${GCP_PROJECT:=$(jq -r '.gcp.projectID // empty' "$metadata")}"
+        # Same precedence as the facts file: the cluster's own record
+        # of its project beats whatever the environment carries.
+        md_project="$(jq -r '.gcp.projectID // empty' "$metadata")"
+        if [ -n "$md_project" ]; then
+            if [ -n "${GCP_PROJECT:-}" ] && [ "$GCP_PROJECT" != "$md_project" ]; then
+                warn "GCP_PROJECT=$GCP_PROJECT differs from metadata.json's $md_project; using $md_project"
+            fi
+            GCP_PROJECT="$md_project"
+        fi
     fi
 fi
 
