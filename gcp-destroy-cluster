@@ -25,6 +25,13 @@
 #   CLUSTER_NAME=aim-2608101150 INFRA=aim-2608101150-abcde \
 #   GCP_PROJECT=<project> BASE_DOMAIN=<domain> gcp-destroy-cluster
 #
+# Named that way it audits and does not delete. openshift-install
+# destroy drives off the directory's metadata.json, so with no
+# directory there is nothing to drive a deletion with: the run tells
+# you what survives and where, and you remove it from that list by
+# hand. The AWS sibling can still delete in this mode, because route
+# servers and ccoctl residue are addressable by name alone.
+#
 # Every phase runs even if an earlier one failed; failures are
 # collected and reported at the end, and the exit status reflects
 # them. This deletes cloud resources and nothing else: the directory
@@ -152,10 +159,16 @@ echo "Infra id:     ${infra:-<none: the install never created the cluster>}"
 echo "Installer:    $installer"
 echo
 
+# Keyed on the same predicate as the deletion phase below, or the
+# banner promises a destroy that named mode never runs.
 echo "Will delete:"
-if [ -n "$infra" ]; then
-    echo "  the cluster $infra, via openshift-install destroy"
+if [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
+    echo "  the cluster ${infra:-$cluster_name}, via openshift-install destroy"
     echo "  (mint-mode service accounts go with it)"
+elif [ -n "$infra" ]; then
+    echo "  nothing: without metadata.json there is nothing for the"
+    echo "  installer to destroy from, so this run only audits what"
+    echo "  survives for $infra"
 else
     echo "  nothing: mint mode creates nothing before the cluster itself"
 fi
