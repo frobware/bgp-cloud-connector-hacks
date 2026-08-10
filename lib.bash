@@ -208,8 +208,15 @@ failure_count() { printf '%s' "${#_failures[@]}"; }
 # Final word, and the exit status. Call this last.
 report() {
     if [ "$dry_run" = true ]; then
-        info "Dry run only, nothing was changed."
-        return 0
+        if [ ${#_failures[@]} -eq 0 ]; then
+            info "Dry run only, nothing was changed."
+            return 0
+        fi
+        # A rehearsal that hit failures must say so and exit non-zero,
+        # or the rehearsal teaches you the real run would work.
+        warn "Dry run only, nothing was changed. ${#_failures[@]} check(s) failed:"
+        for f in "${_failures[@]}"; do warn "  $f"; done
+        return 1
     fi
     if [ ${#_failures[@]} -eq 0 ]; then
         info "Done."
