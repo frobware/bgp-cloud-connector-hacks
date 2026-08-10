@@ -282,7 +282,13 @@ EOF
     info "  wrote $(facts_file)"
 }
 
+# Idempotent, because create_cluster calls this the moment the
+# installer returns and the phase below calls it again.
 record_infra_id() {
+    if grep -q '^infra_id=' "$(facts_file)" 2>/dev/null; then
+        info "  infra id already recorded"
+        return 0
+    fi
     local md="$cluster_dir/metadata.json"
     if [ ! -f "$md" ]; then
         warn "  no metadata.json, cannot record the infra id"
@@ -323,8 +329,18 @@ create_cluster() {
     # The installer would otherwise pick up agent keys that conflict
     # with the cluster's own.
     unset SSH_AUTH_SOCK
+    local status=0
     GOOGLE_CREDENTIALS="$key_file" \
-        "$installer" create cluster --dir="$cluster_dir" --log-level=info
+        "$installer" create cluster --dir="$cluster_dir" --log-level=info || status=$?
+    # Record the infra id here rather than only in the phase below,
+    # which a failed install never reaches. metadata.json is written
+    # as soon as the installer starts creating infrastructure, so an
+    # install that dies midway still leaves one -- and that is
+    # precisely when teardown needs the id, because the first destroy
+    # deletes metadata.json and any retry would otherwise read a facts
+    # file with no infra id and conclude nothing was ever created.
+    record_infra_id || true
+    return "$status"
 }
 
 # Conditions, never columns; see aws-create-cluster for the incident
