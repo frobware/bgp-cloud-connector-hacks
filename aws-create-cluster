@@ -6,7 +6,7 @@
 #   aws-create-cluster --dry-run
 #   aws-create-cluster
 #
-# It takes no arguments and asks nothing. The cluster lands in clusters/<YYMMDDHHMM>
+# It takes no arguments and asks nothing. The cluster lands in clusters/aws-<YYMMDDHHMM>
 # inside this repo, which is gitignored: the directory ends up holding
 # install-config.yaml with your pull secret inlined, auth/kubeconfig,
 # auth/kubeadmin-password and the ccoctl service account signing key.
@@ -51,7 +51,7 @@
 # Environment:
 #
 #   CLUSTER_USER         default $USER
-#   CLUSTER              cluster directory, default clusters/<YYMMDDHHMM>
+#   CLUSTER              cluster directory, default clusters/aws-<YYMMDDHHMM>
 #   OPENSHIFT_INSTALL    default <cluster>/bin/openshift-install, fetched if absent
 #   CCOCTL               default <cluster>/bin/ccoctl, extracted if absent
 #   OCP_CHANNEL          passed to get-openshift-install, default stable-4.22
@@ -121,7 +121,12 @@ ocp_version="$(resolve_ocp_version || true)"
 # path than dots do.
 ocp_tag="$(printf '%s' "$ocp_version" | tr -d '.')"
 
-cluster_dir="${CLUSTER:-$here/clusters/$short_name-$ocp_tag}"
+# aws- in the directory name, because clusters/ holds both clouds now
+# and the directory is how you tell which teardown script a cluster
+# wants. Directories made before this prefix existed keep their names;
+# nothing reads the prefix, so they carry on working -- the destroy
+# scripts decide the cloud from cluster-facts and metadata.json.
+cluster_dir="${CLUSTER:-$here/clusters/aws-$short_name-$ocp_tag}"
 bin_dir="$cluster_dir/bin"
 pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
 export AWS_PROFILE="${AWS_PROFILE:-saml}"

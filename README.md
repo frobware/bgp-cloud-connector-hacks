@@ -151,7 +151,7 @@ the answer you almost always want.
 | Variable | Default | Why you would change it |
 |:---|:---|:---|
 | `CLUSTER_USER` | `$USER` | Your local account name is not the name you want in AWS |
-| `CLUSTER` | `clusters/<short>-<ocp>` | Build somewhere other than inside the repo |
+| `CLUSTER` | `clusters/aws-<short>-<ocp>` | Build somewhere other than inside the repo |
 | `AWS_PROFILE` | `saml` | Another profile holds the credentials |
 | `PULL_SECRET` | `~/.secrets/pull-secret.json` | Yours lives elsewhere |
 | `SSH_KEY` | `~/.ssh/id_ed25519.pub` | A different key should reach the nodes |
@@ -254,7 +254,7 @@ aws-login --force
 One directory per cluster, under `clusters/`, and it owns everything:
 
 ```
-clusters/2608061003-4228/      the suffix is the OCP version, 4.22.8
+clusters/aws-2608061003-4228/  the suffix is the OCP version, 4.22.8
   bin/openshift-install        the exact binary that built it
   bin/ccoctl                   from the same payload, patched
   install-config.yaml.bak      the config, with your pull secret inlined
@@ -337,7 +337,7 @@ then skips straight to the ccoctl residue, which is the case where
 cleanup matters most:
 
 ```
-export CLUSTER=clusters/2608061003-4228
+export CLUSTER=clusters/aws-2608061003-4228
 
 aws-destroy-cluster --dry-run
 aws-destroy-cluster
