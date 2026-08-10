@@ -251,7 +251,12 @@ aws-login --force
 
 ## Cluster directories
 
-One directory per cluster, under `clusters/`, and it owns everything:
+One directory per cluster, under `clusters/`, and it owns everything.
+The name is `<cloud>-<YYMMDDHHMM>-<version>`, because `clusters/`
+holds both clouds and the prefix is how you tell which teardown
+script a directory wants. Nothing reads it, though: the destroy
+scripts decide the cloud from `cluster-facts` and `metadata.json`, so
+directories made before the prefix existed keep working.
 
 ```
 clusters/aws-2608061003-4228/  the suffix is the OCP version, 4.22.8
@@ -286,7 +291,7 @@ The operator discovers route servers and endpoints; it never creates
 them. Until the rosa-bgp Terraform exists, these fill the gap:
 
 ```
-export KUBECONFIG=clusters/<dir>/auth/kubeconfig
+export KUBECONFIG=clusters/aws-<dir>/auth/kubeconfig
 export AWS_PROFILE=saml
 
 aws-create-route-servers --dry-run
@@ -464,9 +469,6 @@ Differences worth knowing, next to AWS:
   residue and no OIDC-bucket collision to preflight for. The analogous
   check is DNS records for `api.<name>.<domain>` and leftover service
   accounts named for the cluster.
-- Cluster directories are `clusters/gcp-<YYMMDDHHMM>-<version>`:
-  `clusters/` mixes clouds now, and the prefix says which teardown
-  script a directory wants.
 - No route servers yet. The GCP analogue is Cloud Router, and that
   side arrives with the bgp-cloud-connector work;
   [rh-mobb/osd-gcp-cudn-routing](https://github.com/rh-mobb/osd-gcp-cudn-routing)
