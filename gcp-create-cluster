@@ -172,7 +172,12 @@ dir_is_empty() {
 name_length_ok()   { [ ${#1} -le 54 ]; }
 name_length_sane() { [ ${#1} -le 21 ]; }
 
-config_name() { awk '/^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$1"; }
+# The flag clears on the next top-level key, or a metadata block with
+# no name: line would let the scan run on into compute:/controlPlane:
+# and hand back a machine-pool name as the cluster's.
+config_name() {
+    awk '/^[^ ]/{f=0} /^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$1"
+}
 
 name_is_rfc1123() { printf '%s' "$1" | grep -qE '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'; }
 
@@ -212,6 +217,7 @@ rename_config() {
     # umask, because the rewrite goes through a scratch file and the
     # pull secret is inside.
     ( umask 077; awk -v name="$cluster_name" '
+        /^[^ ]/ { in_md = 0 }
         /^metadata:/ { in_md = 1 }
         in_md && /^  name:/ { print "  name: " name; in_md = 0; next }
         { print }

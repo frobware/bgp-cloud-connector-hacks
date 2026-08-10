@@ -214,7 +214,12 @@ name_length_sane() { [ ${#1} -le 30 ]; }
 # openshift-install enforces RFC 1123 on metadata.name and rejects the
 # whole config if it fails. Checking it here rather than discovering it
 # after the installer has been downloaded and ccoctl patched.
-config_name() { awk '/^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$1"; }
+# The flag clears on the next top-level key, or a metadata block with
+# no name: line would let the scan run on into compute:/controlPlane:
+# and hand back a machine-pool name as the cluster's.
+config_name() {
+    awk '/^[^ ]/{f=0} /^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$1"
+}
 
 name_is_rfc1123() { printf '%s' "$1" | grep -qE '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'; }
 
@@ -285,7 +290,7 @@ ensure_ccoctl() {
 # install the wrong thing from artefacts that merely exist.
 config_matches_request() {
     local f="$1" want="$2" got
-    got="$(awk '/^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$f")"
+    got="$(config_name "$f")"
     [ "$got" = "$want" ]
 }
 
@@ -302,6 +307,7 @@ rename_config() {
     # umask, because the rewrite goes through a scratch file and the
     # pull secret is inside.
     ( umask 077; awk -v name="$cluster_name" '
+        /^[^ ]/ { in_md = 0 }
         /^metadata:/ { in_md = 1 }
         in_md && /^  name:/ { print "  name: " name; in_md = 0; next }
         { print }
@@ -325,7 +331,7 @@ prepare_config() {
             return 0
         fi
         die "$existing is for a different cluster" \
-            "It names $(awk '/^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$existing"), not $cluster_name." \
+            "It names $(config_name "$existing"), not $cluster_name." \
             "Resuming would install from artefacts that do not match what you asked for." \
             "Either pick a different short name, or remove $cluster_dir and start again."
     fi
