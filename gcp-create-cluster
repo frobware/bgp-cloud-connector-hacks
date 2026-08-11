@@ -101,8 +101,10 @@ key_is_service_account() {
     [ "$(jq -r '.type // empty' "$key_file" 2>/dev/null)" = "service_account" ]
 }
 
+# Only the project id is noise here. Whatever gcloud has to say about a
+# failure belongs to the caller, which prints it under the failed check.
 gcloud_project_ok() {
-    gcloud projects describe "$1" --format 'value(projectId)' >/dev/null 2>&1
+    gcloud projects describe "$1" --format 'value(projectId)' >/dev/null
 }
 
 config_is_yaml() { python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$1"; }
@@ -148,7 +150,7 @@ dns_zone_exists() { [ -n "$(zone_for_domain "$1" "$2")" ]; }
 api_records_free() {
     local project="$1" zone="$2" fqdn="$3" n
     n="$(gcloud dns record-sets list --project "$project" --zone "$zone" \
-        --name "$fqdn." --format 'value(name)' 2>/dev/null)" || return 1
+        --name "$fqdn." --format 'value(name)')" || return 1
     [ -z "$n" ]
 }
 
@@ -158,7 +160,7 @@ api_records_free() {
 service_accounts_free() {
     local n
     n="$(gcloud iam service-accounts list --project "$1" \
-        --filter "email ~ ^${2}-" --format 'value(email)' 2>/dev/null)" || return 1
+        --filter "email ~ ^${2}-" --format 'value(email)')" || return 1
     [ -z "$n" ]
 }
 
@@ -454,7 +456,11 @@ check "DNS zone for $base_domain"         dns_zone_exists "$project" "$base_doma
 # existence has been asserted. An empty zone here means the check
 # above already failed; the record check would then fail too, which is
 # noise, so guard it.
-zone="$(zone_for_domain "$project" "$base_domain")" || zone=""
+#
+# This is the one place worth silencing gcloud: the check above has
+# just made the same call and printed whatever went wrong, so letting
+# this one speak too prints the same complaint twice.
+zone="$(zone_for_domain "$project" "$base_domain" 2>/dev/null)" || zone=""
 if [ -n "$zone" ]; then
     check "no DNS records for api.$cluster_name.$base_domain" \
         api_records_free "$project" "$zone" "api.$cluster_name.$base_domain"

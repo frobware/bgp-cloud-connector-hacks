@@ -34,7 +34,7 @@ zone_for_domain() {
     local zones
     zones="$(gcloud dns managed-zones list --project "$1" \
         --filter "dnsName=${2}. AND visibility=public" \
-        --format 'value(name)' 2>/dev/null)" || return 1
+        --format 'value(name)')" || return 1
     [ "$(printf '%s' "$zones" | grep -c .)" -le 1 ] || return 1
     printf '%s' "$zones"
 }
@@ -44,8 +44,15 @@ require_gcp() {
     [ -n "${GCP_PROJECT:-}" ] || die "GCP_PROJECT is not set" \
         "Name the project, e.g. in .envrc.local:" \
         "  export GCP_PROJECT=<project-id>"
-    gcloud projects describe "$GCP_PROJECT" --format='value(projectId)' >/dev/null 2>&1 && return 0
+    # Repeat what gcloud said rather than guessing why it failed. A
+    # stale refresh token and a 503 from the API fail this probe
+    # identically, so naming invalid_grant unconditionally sends you
+    # off renewing a credential that was working all along.
+    local err
+    capture err gcloud projects describe "$GCP_PROJECT" --format='value(projectId)' && return 0
     die "cannot read project $GCP_PROJECT as $(gcloud config get-value account 2>/dev/null)" \
-        "The login token may have gone stale (invalid_grant). Renew it:" \
+        "gcloud said:" \
+        "${err:-(gcloud failed without saying anything)}" \
+        "If that mentions invalid_grant the login has gone stale; renew it:" \
         "  gcloud auth login"
 }
