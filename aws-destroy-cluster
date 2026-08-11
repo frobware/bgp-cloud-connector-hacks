@@ -109,6 +109,31 @@ if [ -f "$facts" ]; then
         fi
         AWS_REGION="$facts_region"
     fi
+
+    # The role, on the same terms and for a sharper reason. ccoctl's
+    # IAM roles carry inline policies that another role in the same
+    # account cannot delete, and openshift-install does not stop when
+    # it is refused: it logs the 403, logs "Deleted" anyway, and goes
+    # round again. Observed 2026-08-11 with the poweruser default: 44
+    # permission errors and the same role logged deleted 319 times,
+    # still looking healthy from the tail of the log.
+    #
+    # aws-create-cluster records the role it used. Clusters built
+    # before it did have no role key, and there is nothing to infer
+    # from, so say so rather than guess: the ambient value may well be
+    # right.
+    facts_role="$(read_fact "$facts" role)"
+    if [ -n "$facts_role" ]; then
+        if [ -n "${AWS_ROLE:-}" ] && [ "$AWS_ROLE" != "$facts_role" ]; then
+            warn "AWS_ROLE is $AWS_ROLE, but $facts records $facts_role."
+            warn "Using $facts_role, which is what built this cluster."
+        fi
+        export AWS_ROLE="$facts_role"
+    else
+        warn "$facts records no role. Whatever credentials you have will be used."
+        warn "If IAM deletes come back 403 and the run never ends, that is why:"
+        warn "  AWS_ROLE=<the role that built it> ${0##*/}"
+    fi
     [ -n "$cluster_name" ] && echo "Read identifiers from $facts"
 fi
 

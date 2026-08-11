@@ -376,6 +376,22 @@ prepare_config() {
 # exist until create cluster has run.
 facts_file() { printf '%s' "$cluster_dir/cluster-facts"; }
 
+# The bare role name out of the caller identity ARN. Empty when sts
+# cannot be reached, which both callers treat as "say nothing" rather
+# than as an error: neither is the right place to fail on credentials.
+aws_role_name() {
+    local arn
+    arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null || true)"
+    arn="${arn#*assumed-role/}"
+    printf '%s' "${arn%%/*}"
+}
+
+# role is recorded for the same reason region is: at teardown the
+# ambient environment is not evidence of anything. ccoctl's IAM roles
+# carry inline policies that another role in the same account cannot
+# delete, and openshift-install does not stop when it is refused. It
+# logs the 403, logs "Deleted" anyway, and retries for ever. Recording
+# what actually built the cluster is cheaper than recognising that.
 write_cluster_facts() {
     mkdir -p "$cluster_dir"
     cat > "$(facts_file)" <<EOF
@@ -385,6 +401,7 @@ cloud=aws
 cluster_name=$cluster_name
 ccoctl_name=$cluster_name
 region=$region
+role=$(aws_role_name)
 base_domain=$(config_base_domain "$cluster_dir/install-config.yaml.bak")
 ocp_version=${ocp_version:-unknown}
 cluster_dir=$cluster_dir
@@ -762,8 +779,7 @@ if [ "$replicas" != "3" ]; then
 fi
 
 # A short session against a long install is worth knowing about now.
-role_arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null || true)"
-role_name="${role_arn#*assumed-role/}"; role_name="${role_name%%/*}"
+role_name="$(aws_role_name)"
 max_session="$(aws iam get-role --role-name "$role_name" \
     --query Role.MaxSessionDuration --output text 2>/dev/null || echo unknown)"
 if [ "$max_session" != "unknown" ] && [ "$max_session" -lt 5400 ] 2>/dev/null; then
