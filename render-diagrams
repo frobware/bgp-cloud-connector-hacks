@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# Render each bgp-*.svg to a PNG and publish the SVGs to ~/public_html.
+#
+#   ./render-diagrams
+#
+# The SVGs carry a prefers-color-scheme block so they follow whatever
+# is viewing them. PNGs cannot: they are a fixed set of pixels, and
+# whichever variant gets baked in is the one everybody sees. Light is
+# the one to bake, because a PNG ends up pasted into tickets and docs
+# that are themselves light.
+#
+# Chrome will not be told which to use. Both --headless and
+# --headless=old, with and without
+# --blink-settings=preferredColorScheme, produce byte-identical dark
+# output. So the dark rules are stripped into a temporary copy and that
+# is what gets rendered. Deterministic, and it does not depend on the
+# rendering machine's theme.
+#
+# Dimensions come from each SVG's own width and height, so a diagram
+# that changes size does not need a change here.
+
+set -euo pipefail
+
+cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+
+publish_dir="$HOME/public_html/bgp"
+
+command -v google-chrome >/dev/null 2>&1 || {
+    echo "Error: google-chrome is not on PATH" >&2
+    echo "  It is the only SVG renderer on this machine: no rsvg-convert," >&2
+    echo "  no inkscape, no ImageMagick." >&2
+    exit 1
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+mkdir -p "$publish_dir"
+
+shopt -s nullglob
+svgs=(bgp-*.svg)
+[ ${#svgs[@]} -gt 0 ] || { echo "No bgp-*.svg here."; exit 0; }
+
+for svg in "${svgs[@]}"; do
+    png="${svg%.svg}.png"
+
+    read -r w h < <(python3 - "$svg" <<'PY'
+import re, sys
+s = open(sys.argv[1]).read()
+def attr(name):
+    m = re.search(r'\b%s="(\d+)"' % name, s)
+    return m.group(1) if m else ""
+print(attr("width"), attr("height"))
+PY
+    )
+
+    [ -n "$w" ] && [ -n "$h" ] || { echo "Error: no width/height on $svg" >&2; exit 1; }
+
+    python3 - "$svg" "$tmp/light.svg" <<'PY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+i = s.find('@media (prefers-color-scheme: dark)')
+if i >= 0:
+    j = s.find('{', i)
+    depth, k = 0, j
+    while k < len(s):
+        if s[k] == '{':
+            depth += 1
+        elif s[k] == '}':
+            depth -= 1
+            if depth == 0:
+                break
+        k += 1
+    start = s.rfind('\n', 0, i) + 1
+    end = k + 1
+    while end < len(s) and s[end] in ' \n':
+        end += 1
+    s = s[:start] + s[end:]
+open(dst, 'w').write(s)
+PY
+
+    google-chrome --headless --disable-gpu \
+        --screenshot="$png" --window-size="$w,$h" \
+        "file://$tmp/light.svg" >/dev/null 2>&1
+
+    [ -s "$png" ] || { echo "Error: chrome produced nothing for $svg" >&2; exit 1; }
+
+    cp "$svg" "$publish_dir/"
+    printf '  %-26s -> %s (%sx%s), svg published\n' "$svg" "$png" "$w" "$h"
+done
+
+printf '\nPublished to %s\n' "$publish_dir"

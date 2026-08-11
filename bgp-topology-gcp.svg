@@ -1,0 +1,206 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 1150" width="1160" height="1150" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    /* Declares which schemes this document supports, which is what the
+       browser paints the canvas from. Without it the area beyond this
+       fixed 1160-wide box stays white in a dark browser: the media
+       query below only decides what we draw, never what the browser
+       draws around us. */
+    :root { color-scheme: light dark; }
+
+    .bg      { fill: #ffffff; }
+    .title   { fill: #14161a; font-size: 22px; font-weight: 700; }
+    .sub     { fill: #5b6470; font-size: 13px; }
+    .boxlbl  { fill: #14161a; font-size: 14px; font-weight: 600; }
+    .dim     { fill: #5b6470; font-size: 12px; }
+    .mono    { fill: #14161a; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .monodim { fill: #5b6470; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .ok      { fill: #1a7f4b; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .good    { fill: #1a7f4b; font-size: 12px; font-weight: 600; }
+    .warn    { fill: #b3341f; font-size: 12px; font-weight: 600; }
+    .warntxt { fill: #b3341f; font-size: 12px; }
+
+    .vpc     { fill: #f4f7fb; stroke: #98a6b8; stroke-width: 1.5; }
+    .lblbg   { fill: #f4f7fb; }
+    .subnet  { fill: #e8eff8; stroke: #7f95b0; stroke-width: 1.5; }
+    .node    { fill: #ffffff; stroke: #2f6fb0; stroke-width: 2; }
+    .router  { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 2; }
+    .chip    { fill: #ffffff; stroke: #2f8f5b; stroke-width: 2; }
+    .ncc     { fill: #f6f1fb; stroke: #8b6bb1; stroke-width: 1.5; stroke-dasharray: 7 5; }
+    .nccchip { fill: #ffffff; stroke: #8b6bb1; stroke-width: 2; }
+    .rt      { fill: #fdf6e6; stroke: #b8891f; stroke-width: 2; }
+    .gotcha  { fill: #fdf0ee; stroke: #b3341f; stroke-width: 1.5; }
+
+    .session { stroke: #2f8f5b; stroke-width: 2; fill: none; }
+    .elig    { stroke: #8b6bb1; stroke-width: 1.6; stroke-dasharray: 3 4; fill: none; }
+    .flow    { stroke: #2f8f5b; stroke-width: 2.5; fill: none; }
+
+    @media (prefers-color-scheme: dark) {
+      .bg      { fill: #0f1115; }
+      .title   { fill: #e9ecf1; }
+      .sub     { fill: #99a2ae; }
+      .boxlbl  { fill: #e9ecf1; }
+      .dim     { fill: #99a2ae; }
+      .mono    { fill: #e9ecf1; }
+      .monodim { fill: #99a2ae; }
+      .ok      { fill: #57c98b; }
+      .good    { fill: #57c98b; }
+      .warn    { fill: #ff8168; }
+      .warntxt { fill: #ff8168; }
+
+      .vpc     { fill: #161a21; stroke: #46536a; }
+      .lblbg   { fill: #161a21; }
+      .subnet  { fill: #1b2230; stroke: #5a6d8c; }
+      .node    { fill: #121722; stroke: #5a9bd8; }
+      .router  { fill: #12201a; stroke: #4fb37c; }
+      .chip    { fill: #121722; stroke: #4fb37c; }
+      .ncc     { fill: #1a1622; stroke: #a98bd0; }
+      .nccchip { fill: #121722; stroke: #a98bd0; }
+      .rt      { fill: #221d12; stroke: #d8a63c; }
+      .gotcha  { fill: #241614; stroke: #ff8168; }
+
+      .session { stroke: #4fb37c; }
+      .elig    { stroke: #a98bd0; }
+      .flow    { stroke: #4fb37c; }
+    }
+  </style>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f8f5b"/>
+    </marker>
+    <marker id="arrowv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b6bb1"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1160" height="1150"/>
+
+  <text class="title" x="60" y="40">GCP BGP topology, cluster amcdermo-2608111003-5fkjh</text>
+  <text class="sub" x="60" y="62">Region us-east1. Observed working 2026-08-11. Two kinds of registration per node, plus a firewall rule and one FRR setting that no diagram of NCC mentions.</text>
+
+  <!-- NCC -->
+  <rect class="ncc" x="60" y="86" width="1040" height="112" rx="8"/>
+  <text class="boxlbl" x="78" y="110">Network Connectivity Center (NCC), global</text>
+  <text class="dim" x="78" y="128">Registration 1: which VMs may speak BGP at all. Configuration records, not forwarding elements: nothing is forwarded through a hub or a spoke.</text>
+
+  <rect class="nccchip" x="90" y="138" width="290" height="46" rx="6"/>
+  <text class="mono" x="104" y="158">hub  ...-bgp-hub</text>
+  <text class="monodim" x="104" y="176">ACTIVE</text>
+
+  <path class="elig" d="M 380 161 L 415 161" marker-end="url(#arrowv)"/>
+
+  <rect class="nccchip" x="425" y="138" width="420" height="46" rx="6"/>
+  <text class="mono" x="439" y="158">spoke  ...-bgp-spoke   ROUTER_APPLIANCE</text>
+  <text class="monodim" x="439" y="176">us-east1   ACTIVE   members: 10.0.128.2, .3, .4</text>
+
+  <text class="dim" x="866" y="158">3 members,</text>
+  <text class="dim" x="866" y="176">one per router node</text>
+
+  <!-- VPC -->
+  <rect class="vpc" x="60" y="232" width="1040" height="716" rx="8"/>
+  <text class="boxlbl" x="78" y="256">VPC network  amcdermo-2608111003-5fkjh-network</text>
+
+  <text class="dim" x="106" y="300">Registration 1 applies to the three nodes below, and to nothing else.</text>
+
+  <!-- worker subnet -->
+  <rect class="subnet" x="90" y="336" width="980" height="158" rx="8"/>
+  <text class="boxlbl" x="106" y="358">worker subnet  10.0.128.0/17  -  regional, spans all three zones</text>
+
+  <rect class="node" x="120" y="368" width="290" height="108" rx="7"/>
+  <text class="mono" x="136" y="392">worker-b-9khtb</text>
+  <text class="dim" x="136" y="412">zone us-east1-b</text>
+  <text class="mono" x="136" y="434">10.0.128.3</text>
+  <text class="ok" x="136" y="456">canIpForward: true</text>
+
+  <rect class="node" x="440" y="368" width="290" height="108" rx="7"/>
+  <text class="mono" x="456" y="392">worker-c-bw8qf</text>
+  <text class="dim" x="456" y="412">zone us-east1-c</text>
+  <text class="mono" x="456" y="434">10.0.128.2</text>
+  <text class="ok" x="456" y="456">canIpForward: true</text>
+
+  <rect class="node" x="760" y="368" width="290" height="108" rx="7"/>
+  <text class="mono" x="776" y="392">worker-d-bslns</text>
+  <text class="dim" x="776" y="412">zone us-east1-d</text>
+  <text class="mono" x="776" y="434">10.0.128.4</text>
+  <text class="ok" x="776" y="456">canIpForward: true</text>
+
+  <!-- eligibility lines -->
+  <path class="elig" d="M 560 184 L 560 336"/>
+  <path class="elig" d="M 265 200 L 265 336"/>
+  <path class="elig" d="M 905 200 L 905 336"/>
+  <path class="elig" d="M 265 200 L 905 200"/>
+
+  <!-- 6 BGP sessions -->
+  <path class="session" d="M 265 476 L 380 566"/>
+  <path class="session" d="M 265 476 L 780 566"/>
+  <path class="session" d="M 585 476 L 380 566"/>
+  <path class="session" d="M 585 476 L 780 566"/>
+  <path class="session" d="M 905 476 L 380 566"/>
+  <path class="session" d="M 905 476 L 780 566"/>
+
+  <rect class="lblbg" x="380" y="500" width="400" height="46" rx="4"/>
+  <text class="good" x="580" y="518" text-anchor="middle">6 sessions Established = 3 nodes x 2 interfaces</text>
+  <text class="dim" x="580" y="537" text-anchor="middle">Each advertises 10.200.1.0/24. learned=1 per peer.</text>
+
+  <!-- cloud router -->
+  <rect class="router" x="90" y="566" width="980" height="158" rx="8"/>
+  <text class="boxlbl" x="106" y="590">Cloud Router  ...-bgp-router  -  ASN 65000, its autonomous system number (the "remote" one, from a node's point of view)</text>
+  <text class="dim" x="106" y="608">Registration 2: one BGP peer per node per interface, each naming the node's address and ASN 65001.</text>
+
+  <rect class="chip" x="250" y="620" width="260" height="62" rx="6"/>
+  <text class="mono" x="266" y="642">cudn-bgp-if-0</text>
+  <text class="mono" x="266" y="664">10.0.128.5/17</text>
+
+  <rect class="chip" x="650" y="620" width="260" height="62" rx="6"/>
+  <text class="mono" x="666" y="642">cudn-bgp-if-1</text>
+  <text class="mono" x="666" y="664">10.0.128.6/17</text>
+
+  <path class="elig" d="M 510 651 L 650 651"/>
+  <text class="dim" x="524" y="645">redundant</text>
+  <text class="dim" x="530" y="663">pair</text>
+
+  <text class="dim" x="106" y="706">Addresses allocated from the worker subnet above. Ordinary private addresses, not link-local 169.254 ones: the gcloud --ip-address help describes a different case.</text>
+
+  <path class="flow" d="M 580 724 L 580 762" marker-end="url(#arrow)"/>
+  <text class="dim" x="596" y="750">installs what it learns</text>
+
+  <!-- route table -->
+  <rect class="rt" x="90" y="766" width="980" height="106" rx="8"/>
+  <text class="boxlbl" x="106" y="790">VPC route table, populated</text>
+  <text class="mono" x="106" y="814">10.200.1.0/24</text>
+  <text class="mono" x="250" y="814">-&gt;</text>
+  <text class="mono" x="282" y="814">10.0.128.2</text>
+  <text class="mono" x="106" y="834">10.200.1.0/24</text>
+  <text class="mono" x="250" y="834">-&gt;</text>
+  <text class="mono" x="282" y="834">10.0.128.3</text>
+  <text class="mono" x="106" y="854">10.200.1.0/24</text>
+  <text class="mono" x="250" y="854">-&gt;</text>
+  <text class="mono" x="282" y="854">10.0.128.4</text>
+  <text class="dim" x="430" y="814">Three next hops for one prefix. A Layer2 CUDN is one flat segment shared by every node, so</text>
+  <text class="dim" x="430" y="834">every node advertises the whole subnet, not a slice and not host routes.</text>
+  <text class="dim" x="430" y="854">Observed with zero pods in the namespace, so it is the subnet, not the pods.</text>
+
+  <!-- gotchas -->
+  <rect class="gotcha" x="90" y="888" width="980" height="44" rx="6"/>
+  <text class="warn" x="106" y="906">Neither of these appears in any NCC topology picture, and without both the sessions never come up:</text>
+  <text class="warntxt" x="106" y="924">a firewall rule allowing tcp:179 from 10.0.128.5 and .6, and ebgpMultiHop on every neighbour.</text>
+
+  <!-- footnotes -->
+  <text class="dim" x="60" y="972">GCP denies ingress by default and the installer opens 6443, etcd, node ports and geneve. Nothing opens 179.</text>
+  <text class="dim" x="60" y="990">A GCP VM has no subnet route: a /32 for itself, a /32 for the gateway, a default route. So a Cloud Router interface in the same</text>
+  <text class="dim" x="60" y="1008">subnet resolves only via 0.0.0.0/0, FRR's connected check for single-hop external BGP fails, and it never opens the TCP connection.</text>
+  <text class="dim" x="60" y="1026">Also here, taking no part: 3 masters in 10.0.0.0/17. routingMode is REGIONAL, so these routes apply only within us-east1.</text>
+
+  <text class="boxlbl" x="60" y="1062">Terms</text>
+  <text class="dim" x="60" y="1082">BGP, the Border Gateway Protocol: how two routers tell each other which addresses they can reach. An ASN, autonomous system number, identifies each side.</text>
+  <text class="dim" x="60" y="1100">A CUDN is a cluster user-defined network: the pod network being advertised here. canIpForward is GCP's permission for a VM to forward packets not addressed to it.</text>
+
+  <!-- legend -->
+  <text class="boxlbl" x="60" y="1130">Legend</text>
+  <path class="elig" d="M 132 1126 L 182 1126"/>
+  <text class="dim" x="192" y="1130">NCC registration, not a forwarding path</text>
+  <path class="session" d="M 452 1126 L 502 1126"/>
+  <text class="dim" x="512" y="1130">BGP session, Established</text>
+  <path class="flow" d="M 748 1126 L 798 1126" marker-end="url(#arrow)"/>
+  <text class="dim" x="808" y="1130">routes installed into the VPC</text>
+</svg>

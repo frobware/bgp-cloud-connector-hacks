@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 760" width="1160" height="760" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    :root { color-scheme: light dark; }
+
+    .bg      { fill: #ffffff; }
+    .title   { fill: #14161a; font-size: 22px; font-weight: 700; }
+    .sub     { fill: #5b6470; font-size: 13px; }
+    .boxlbl  { fill: #14161a; font-size: 14px; font-weight: 600; }
+    .dim     { fill: #5b6470; font-size: 12px; }
+    .mono    { fill: #14161a; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .monodim { fill: #5b6470; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .good    { fill: #1a7f4b; font-size: 12px; font-weight: 600; }
+    .goodm   { fill: #1a7f4b; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .bad     { fill: #b3341f; font-size: 12px; font-weight: 600; }
+    .badm    { fill: #b3341f; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+    .banner  { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 1.5; stroke-dasharray: 7 5; }
+    .plain   { fill: #f2f3f5; stroke: #7b838d; stroke-width: 2; }
+    .rt      { fill: #fdf6e6; stroke: #b8891f; stroke-width: 2; }
+    .okbox   { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 2; }
+    .nobox   { fill: #fdf0ee; stroke: #b3341f; stroke-width: 2; }
+    .ev      { fill: #f7f8fa; stroke: #b6bcc4; stroke-width: 1.5; }
+
+    .fok     { stroke: #2f8f5b; stroke-width: 3; fill: none; }
+    .fno     { stroke: #b3341f; stroke-width: 3; stroke-dasharray: 6 5; fill: none; }
+    .fplain  { stroke: #7b838d; stroke-width: 2.5; fill: none; }
+
+    @media (prefers-color-scheme: dark) {
+      .bg      { fill: #0f1115; }
+      .title   { fill: #e9ecf1; }
+      .sub     { fill: #99a2ae; }
+      .boxlbl  { fill: #e9ecf1; }
+      .dim     { fill: #99a2ae; }
+      .mono    { fill: #e9ecf1; }
+      .monodim { fill: #99a2ae; }
+      .good    { fill: #57c98b; }
+      .goodm   { fill: #57c98b; }
+      .bad     { fill: #ff8168; }
+      .badm    { fill: #ff8168; }
+
+      .banner  { fill: #12201a; stroke: #4fb37c; }
+      .plain   { fill: #191c21; stroke: #98a1ab; }
+      .rt      { fill: #221d12; stroke: #d8a63c; }
+      .okbox   { fill: #12201a; stroke: #4fb37c; }
+      .nobox   { fill: #241614; stroke: #ff8168; }
+      .ev      { fill: #171a1f; stroke: #3c434d; }
+
+      .fok     { stroke: #4fb37c; }
+      .fno     { stroke: #ff8168; }
+      .fplain  { stroke: #98a1ab; }
+    }
+  </style>
+
+  <defs>
+    <marker id="ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f8f5b"/>
+    </marker>
+    <marker id="no" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b3341f"/>
+    </marker>
+    <marker id="pl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b838d"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1160" height="760"/>
+
+  <text class="title" x="40" y="38">What a plain VM can reach, and what it cannot</text>
+  <text class="sub" x="40" y="60">Observed 2026-08-11 on cluster amcdermo-2608111003-5fkjh. The VM has no OpenShift on it and no specific route to either address, only a default route.</text>
+
+  <rect class="banner" x="40" y="76" width="1080" height="34" rx="6"/>
+  <text class="dim" x="56" y="98">Pod addresses are reachable because BGP advertised them. Service ClusterIPs are not, because nothing advertises 172.30.0.0/16.</text>
+
+  <!-- client -->
+  <rect class="plain" x="40" y="180" width="220" height="130" rx="7"/>
+  <text class="boxlbl" x="56" y="204">client VM</text>
+  <text class="dim" x="56" y="224">plain Debian 12</text>
+  <text class="dim" x="56" y="242">no OpenShift, us-east1-b</text>
+  <text class="mono" x="56" y="266">10.0.128.9</text>
+  <text class="dim" x="56" y="290">sends both to its gateway</text>
+
+  <path class="fplain" d="M 262 245 L 296 245" marker-end="url(#pl)"/>
+
+  <!-- route table -->
+  <rect class="rt" x="300" y="150" width="400" height="190" rx="7"/>
+  <text class="boxlbl" x="316" y="174">VPC route table</text>
+  <text class="dim" x="316" y="194">The only thing that differs between the two</text>
+  <text class="dim" x="316" y="212">attempts. The VM itself cannot tell them apart.</text>
+
+  <text class="goodm" x="316" y="242">10.200.1.0/24</text>
+  <text class="goodm" x="440" y="242">-&gt; 10.0.128.2</text>
+  <text class="goodm" x="440" y="260">-&gt; 10.0.128.3</text>
+  <text class="goodm" x="440" y="278">-&gt; 10.0.128.4</text>
+  <text class="good" x="316" y="278">learned</text>
+
+  <text class="badm" x="316" y="312">172.30.0.0/16</text>
+  <text class="bad" x="440" y="312">no route, never advertised</text>
+
+  <path class="fok" d="M 702 220 L 746 220" marker-end="url(#ok)"/>
+  <path class="fno" d="M 702 310 L 746 310" marker-end="url(#no)"/>
+
+  <!-- reachable -->
+  <rect class="okbox" x="750" y="176" width="370" height="88" rx="7"/>
+  <text class="boxlbl" x="766" y="200">pod on the CUDN</text>
+  <text class="mono" x="766" y="222">10.200.1.7:8080</text>
+  <text class="good" x="766" y="246">curl rc=0 http_code=200, ping OK</text>
+
+  <!-- unreachable -->
+  <rect class="nobox" x="750" y="276" width="370" height="88" rx="7"/>
+  <text class="boxlbl" x="766" y="300">Service ClusterIP</text>
+  <text class="mono" x="766" y="322">172.30.32.129:8080</text>
+  <text class="bad" x="766" y="346">curl rc=28 timeout, http_code=000</text>
+
+  <!-- evidence -->
+  <rect class="ev" x="40" y="396" width="1080" height="150" rx="7"/>
+  <text class="boxlbl" x="56" y="420">Evidence, verbatim</text>
+
+  <text class="monodim" x="56" y="444">route to pod:</text>
+  <text class="mono" x="220" y="444">10.200.1.7 via 10.0.128.1 dev ens4 src 10.0.128.9</text>
+  <text class="monodim" x="56" y="462">route to svc:</text>
+  <text class="mono" x="220" y="462">172.30.32.129 via 10.0.128.1 dev ens4 src 10.0.128.9</text>
+  <text class="dim" x="700" y="462">Identical. The VM has no idea one will fail.</text>
+
+  <text class="monodim" x="56" y="492">pod access log:</text>
+  <text class="goodm" x="220" y="492">10.0.128.9 - - [11/Aug/2026:15:20:31] "GET /?from=bgp-test-client HTTP/1.1" 200 133 "-" "curl/7.88.1"</text>
+  <text class="good" x="56" y="516">The address is the TCP peer, not a header the client can assert. ?from= is the VM's own hostname. No SNAT anywhere on the path.</text>
+  <text class="dim" x="56" y="534">There is no X-Forwarded-For here and there should not be: that header exists because a proxy replaced the source address, and nothing proxies on this path.</text>
+
+  <!-- notes -->
+  <text class="dim" x="40" y="580">Why the Service is not reachable, and why that is not a fault: RouteAdvertisements is set to advertisements: ["PodNetwork"], so only the</text>
+  <text class="dim" x="40" y="598">CUDN subnet is announced. A ClusterIP is an in-cluster construct that the nodes implement; nothing outside the cluster would know how to</text>
+  <text class="dim" x="40" y="616">load balance it even if a route existed. External access to a Service is a job for a LoadBalancer, a Route, or a NodePort, not for this.</text>
+
+  <text class="dim" x="40" y="650">Two firewall rules were needed, neither created by the installer: tcp:179 for the BGP sessions themselves, and tcp:8080 plus icmp from</text>
+  <text class="dim" x="40" y="668">this VM to the router nodes for the traffic above. GCP denies ingress by default, so the second is easy to forget once BGP is green.</text>
+  <text class="boxlbl" x="40" y="706">Terms</text>
+  <text class="dim" x="40" y="726">A CUDN is a cluster user-defined network: the pod network advertised over BGP. A Service ClusterIP is a virtual address that exists only inside the cluster.</text>
+  <text class="dim" x="40" y="744">SNAT, source address translation, is rewriting the sender's address. The pod seeing the client's own address is what shows none happened.</text>
+</svg>

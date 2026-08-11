@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 1000" width="1160" height="1000" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    /* Declares which schemes this document supports, which is what the
+       browser paints the canvas from. Without it the area beyond this
+       fixed 1160-wide box stays white in a dark browser: the media
+       query below only decides what we draw, never what the browser
+       draws around us. */
+    :root { color-scheme: light dark; }
+
+    .bg      { fill: #ffffff; }
+    .title   { fill: #14161a; font-size: 22px; font-weight: 700; }
+    .sub     { fill: #5b6470; font-size: 13px; }
+    .boxlbl  { fill: #14161a; font-size: 14px; font-weight: 600; }
+    .dim     { fill: #5b6470; font-size: 12px; }
+    .mono    { fill: #14161a; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .monodim { fill: #5b6470; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .step    { fill: #2f6fb0; font-size: 13px; font-weight: 700; }
+    .warn    { fill: #b3341f; font-size: 12px; font-weight: 600; }
+    .warntxt { fill: #b3341f; font-size: 12px; }
+
+    .banner  { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 1.5; stroke-dasharray: 7 5; }
+    .ctl     { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 2; }
+    .rt      { fill: #fdf6e6; stroke: #b8891f; stroke-width: 2; }
+    .box     { fill: #ffffff; stroke: #2f6fb0; stroke-width: 2; }
+    .plain   { fill: #f2f3f5; stroke: #7b838d; stroke-width: 2; }
+    .pod     { fill: #f2f0fb; stroke: #6b5bb1; stroke-width: 2; }
+    .callout { fill: #fdf0ee; stroke: #b3341f; stroke-width: 1.5; }
+
+    .fmain   { stroke: #2f6fb0; stroke-width: 3; fill: none; }
+    .fret    { stroke: #7b838d; stroke-width: 2; stroke-dasharray: 7 4; fill: none; }
+    .fctl    { stroke: #2f8f5b; stroke-width: 2.5; fill: none; }
+    .lead    { stroke: #b3341f; stroke-width: 1.2; stroke-dasharray: 3 3; fill: none; }
+
+    @media (prefers-color-scheme: dark) {
+      .bg      { fill: #0f1115; }
+      .title   { fill: #e9ecf1; }
+      .sub     { fill: #99a2ae; }
+      .boxlbl  { fill: #e9ecf1; }
+      .dim     { fill: #99a2ae; }
+      .mono    { fill: #e9ecf1; }
+      .monodim { fill: #99a2ae; }
+      .step    { fill: #7fb4e8; }
+      .warn    { fill: #ff8168; }
+      .warntxt { fill: #ff8168; }
+
+      .banner  { fill: #12201a; stroke: #4fb37c; }
+      .ctl     { fill: #12201a; stroke: #4fb37c; }
+      .rt      { fill: #221d12; stroke: #d8a63c; }
+      .box     { fill: #121722; stroke: #5a9bd8; }
+      .plain   { fill: #191c21; stroke: #98a1ab; }
+      .pod     { fill: #191426; stroke: #9b8bd6; }
+      .callout { fill: #241614; stroke: #ff8168; }
+
+      .fmain   { stroke: #5a9bd8; }
+      .fret    { stroke: #98a1ab; }
+      .fctl    { stroke: #4fb37c; }
+      .lead    { stroke: #ff8168; }
+    }
+</style>
+
+  <defs>
+    <marker id="aMain" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f6fb0"/>
+    </marker>
+    <marker id="aRet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b838d"/>
+    </marker>
+    <marker id="aCtl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f8f5b"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1160" height="1000"/>
+
+  <text class="title" x="40" y="38">GCP data path: how a packet actually reaches a pod</text>
+  <text class="sub" x="40" y="60">The point of all the plumbing in bgp-topology-gcp.svg. Client 10.0.128.9, pod 10.200.1.7 on CUDN 10.200.1.0/24, hosted on worker-d.</text>
+
+  <rect class="banner" x="40" y="76" width="1080" height="34" rx="6"/>
+  <text class="dim" x="56" y="98">OBSERVED END TO END, 2026-08-11. A plain Debian VM reached the pod at its own address and the pod logged the caller as 10.0.128.9: no SNAT.</text>
+
+  <!-- control plane band -->
+  <text class="boxlbl" x="40" y="148">Where the route table row comes from (this part is built)</text>
+
+  <rect class="ctl" x="180" y="160" width="300" height="62" rx="7"/>
+  <text class="boxlbl" x="196" y="182">Cloud Router, ASN 65000</text>
+  <text class="monodim" x="196" y="204">10.0.128.5 and 10.0.128.6</text>
+
+  <rect class="ctl" x="660" y="160" width="300" height="62" rx="7"/>
+  <text class="boxlbl" x="676" y="182">FRR on each router node, ASN 65001</text>
+  <text class="monodim" x="676" y="204">each announces itself as next hop</text>
+
+  <path class="fctl" d="M 655 191 L 490 191" marker-end="url(#aCtl)"/>
+  <text class="dim" x="572" y="184" text-anchor="middle">BGP</text>
+  <text class="monodim" x="572" y="216" text-anchor="middle">10.200.1.0/24</text>
+  <text class="monodim" x="572" y="232" text-anchor="middle">next hop = itself</text>
+
+  <path class="fctl" d="M 330 222 L 330 268" marker-end="url(#aCtl)"/>
+  <text class="dim" x="344" y="250">installs</text>
+
+  <!-- route table -->
+  <rect class="rt" x="180" y="272" width="620" height="104" rx="7"/>
+  <text class="boxlbl" x="196" y="296">VPC route table, observed</text>
+  <text class="mono" x="196" y="320">10.200.1.0/24</text>
+  <text class="mono" x="320" y="320">-&gt;</text>
+  <text class="mono" x="352" y="320">10.0.128.2, 10.0.128.3, 10.0.128.4</text>
+  
+  <text class="dim" x="196" y="342">One prefix, three next hops, one per node. Without this the fabric has nowhere to send the packet.</text>
+  <text class="dim" x="196" y="364">A Layer2 CUDN is one flat segment, so every node advertises the whole subnet. Verified with zero pods present.</text>
+
+  <path class="lead" d="M 350 376 L 350 420"/>
+
+  <!-- data path -->
+  <rect class="plain" x="40" y="420" width="180" height="110" rx="7"/>
+  <text class="boxlbl" x="56" y="444">client VM</text>
+  <text class="dim" x="56" y="463">plain Debian, no</text>
+  <text class="dim" x="56" y="479">OpenShift, us-east1</text>
+  <text class="mono" x="56" y="503">10.0.128.9</text>
+
+  <rect class="box" x="260" y="420" width="180" height="110" rx="7"/>
+  <text class="boxlbl" x="276" y="444">VPC fabric</text>
+  <text class="dim" x="276" y="463">consults the route</text>
+  <text class="dim" x="276" y="479">table above</text>
+  <text class="monodim" x="276" y="503">dst 10.200.1.7</text>
+
+  <rect class="box" x="480" y="420" width="180" height="110" rx="7"/>
+  <text class="boxlbl" x="496" y="444">a node's NIC</text>
+  <text class="dim" x="496" y="463">whichever of the three</text>
+  <text class="dim" x="496" y="479">the fabric picks</text>
+  <text class="mono" x="496" y="503">canIpForward</text>
+
+  <rect class="box" x="700" y="420" width="180" height="110" rx="7"/>
+  <text class="boxlbl" x="716" y="444">kernel + OVN</text>
+  <text class="dim" x="716" y="463">delivers on the CUDN,</text>
+  <text class="dim" x="716" y="479">crossing the overlay</text>
+  <text class="dim" x="716" y="495">if the pod is elsewhere</text>
+  <text class="monodim" x="716" y="516">Layer2 topology</text>
+
+  <rect class="pod" x="920" y="420" width="180" height="110" rx="7"/>
+  <text class="boxlbl" x="936" y="444">pod</text>
+  <text class="dim" x="936" y="463">reached at its own</text>
+  <text class="dim" x="936" y="479">address, saw 10.0.128.9</text>
+  <text class="mono" x="936" y="503">10.200.1.7</text>
+
+  <path class="fmain" d="M 222 475 L 256 475" marker-end="url(#aMain)"/>
+  <path class="fmain" d="M 442 475 L 476 475" marker-end="url(#aMain)"/>
+  <path class="fmain" d="M 662 475 L 696 475" marker-end="url(#aMain)"/>
+  <path class="fmain" d="M 882 475 L 916 475" marker-end="url(#aMain)"/>
+
+  <text class="step" x="239" y="410" text-anchor="middle">1</text>
+  <text class="step" x="459" y="410" text-anchor="middle">2</text>
+  <text class="step" x="679" y="410" text-anchor="middle">3</text>
+  <text class="step" x="899" y="410" text-anchor="middle">4</text>
+
+  <!-- failure callouts -->
+  <path class="lead" d="M 350 530 L 350 556"/>
+  <path class="lead" d="M 570 530 L 570 556"/>
+
+  <rect class="callout" x="200" y="556" width="300" height="64" rx="6"/>
+  <text class="warn" x="214" y="576">No matching route here</text>
+  <text class="warntxt" x="214" y="594">Packet discarded by the fabric. Never</text>
+  <text class="warntxt" x="214" y="610">reaches the cluster. Scenarios A to D.</text>
+
+  <rect class="callout" x="530" y="556" width="380" height="64" rx="6"/>
+  <text class="warn" x="544" y="576">canIpForward false</text>
+  <text class="warntxt" x="544" y="594">Dropped silently by the NIC. BGP still Established,</text>
+  <text class="warntxt" x="544" y="610">route still present, conditions still True. Scenario E.</text>
+
+  <!-- return path -->
+  <path class="fret" d="M 1010 530 L 1010 654 L 130 654 L 130 530" marker-end="url(#aRet)"/>
+  <rect class="bg" x="180" y="633" width="780" height="20"/>
+  <text class="dim" x="570" y="646" text-anchor="middle">5, 6: return, src=10.200.1.7 dst=10.0.128.9, leaving the NIC with a source that is not the node's, so the same check applies in reverse</text>
+
+  <!-- triage -->
+  <text class="boxlbl" x="40" y="706">Triage, when it does not work</text>
+
+  <text class="monodim" x="40" y="732">route in VPC table?</text>
+  <text class="monodim" x="230" y="732">node sees the packet?</text>
+  <text class="monodim" x="450" y="732">where it is broken</text>
+
+  <text class="mono" x="40" y="752">no</text>
+  <text class="mono" x="230" y="752">--</text>
+  <text class="mono" x="450" y="752">BGP. Scenarios A to D.</text>
+
+  <text class="mono" x="40" y="772">yes</text>
+  <text class="mono" x="230" y="772">no</text>
+  <text class="mono" x="450" y="772">the NIC. Scenario E.</text>
+
+  <text class="mono" x="40" y="792">yes</text>
+  <text class="mono" x="230" y="792">yes, pod does not</text>
+  <text class="mono" x="450" y="792">OVN-Kubernetes, not this operator.</text>
+
+  <text class="dim" x="40" y="816">Silence in tcpdump on the node the route points at, while the route says it went there, is the signature of the forwarding check.</text>
+  <text class="warntxt" x="40" y="846">GCP denies ingress by default, so this path needs two firewall rules, not one: tcp:179 for the BGP sessions, and one for the traffic itself</text>
+  <text class="warntxt" x="40" y="864">from the client to the router nodes. Neither is created by the installer, and the second is easy to forget once BGP is working.</text>
+
+  <text class="warntxt" x="40" y="894">This VPC has routingMode REGIONAL, so routes the Cloud Router learns apply only in us-east1. A GCP VPC is global, unlike an AWS one,</text>
+  <text class="warntxt" x="40" y="912">and REGIONAL is the default. A client in another region shares the VPC and still cannot reach the pod. GLOBAL mode is what lifts that.</text>
+  <text class="boxlbl" x="40" y="950">Terms</text>
+  <text class="dim" x="40" y="970">SNAT, source address translation: rewriting the sender's address so replies come back via the rewriter. Avoiding it is the point of all this.</text>
+  <text class="dim" x="40" y="988">A CUDN is a cluster user-defined network. canIpForward is GCP's permission for a VM to forward packets not addressed to it. An ASN identifies a BGP speaker.</text>
+</svg>

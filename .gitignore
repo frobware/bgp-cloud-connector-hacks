@@ -49,6 +49,16 @@
 !gcp-installer-credentials
 !get-openshift-install
 
+# Diagrams. The .svg is the source; the .png is rendered from it by
+# render-diagrams, which also publishes the .svg to ~/public_html/bgp.
+!render-diagrams
+!bgp-topology-gcp.svg
+!bgp-topology-gcp.png
+!bgp-datapath-gcp.svg
+!bgp-datapath-gcp.png
+!bgp-proof-gcp.svg
+!bgp-proof-gcp.png
+
 # Go sources, wherever they live under cmd/.
 !*.go
 
