@@ -40,6 +40,9 @@
 !aws-install-saml
 !aws-list-route-servers
 !aws-login
+!gcp-create-cloud-router
+!gcp-delete-cloud-router
+!gcp-list-cloud-router
 !gcp-create-cluster
 !gcp-create-install-config
 !gcp-destroy-cluster

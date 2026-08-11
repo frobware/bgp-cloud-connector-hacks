@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+#
+# Show every Network Connectivity Center (NCC) hub, router appliance
+# spoke and BGP-speaking Cloud Router in the project, with the live
+# state of each BGP session.
+#
+#   gcp-list-cloud-router
+#   GCP_PROJECT=openshift-qe gcp-list-cloud-router
+#
+# Deliberately project-wide rather than scoped to your cluster, for the
+# same reason aws-list-route-servers is account-wide: these outlive the
+# clusters they were built for. gcp-destroy-cluster does not know about
+# any of it, so the useful question is "what is left here that nobody
+# owns" rather than "what did I make". Anything pointing at an instance
+# that has gone is flagged as orphaned.
+#
+# A stale peer is not cosmetic. It is the drift a node replacement
+# leaves behind, and the thing the operator would exist to reconcile:
+# a registration for an address nothing will dial from again, next to a
+# live node nothing has registered.
+#
+# Cloud NAT routers are excluded. Every OpenShift cluster in a shared
+# project has one and none of them speak BGP, so listing them buries
+# the one router that matters. The filter is bgp.asn, since a router
+# without an ASN cannot peer with anything.
+#
+# Read-only.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gcp-lib.bash"
+
+[ $# -eq 0 ] || die "unknown option: $1" "Usage: ${0##*/}"
+
+require_cmd gcloud
+
+# The project comes from the environment or from whatever cluster is
+# reachable. Unlike the create script this does not insist on a
+# cluster: the whole point is to be usable once the cluster is gone.
+if [ -z "${GCP_PROJECT:-}" ]; then
+    GCP_PROJECT="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.gcp.projectID}' 2>/dev/null || true)"
+fi
+[ -n "${GCP_PROJECT:-}" ] || die "GCP_PROJECT is not set and no cluster is reachable" \
+    "Name the project, or connect to a cluster to borrow its:" \
+    "  GCP_PROJECT=<project-id> ${0##*/}"
+export GCP_PROJECT
+require_gcp
+
+project="$GCP_PROJECT"
+g() { gcloud --project="$project" "$@"; }
+
+# Empty when no cluster is reachable, which is fine. It only decides
+# whether something gets flagged as this cluster's.
+mine="$(oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}' 2>/dev/null || true)"
+
+info "Project: $project"
+[ -n "$mine" ] && info "Cluster: $mine"
+info ""
+
+# Every live instance as zone/name, fetched once. The alternative is an
+# existence probe per peer, and a describe of an instance that has gone
+# fails outright rather than returning nothing, so it cannot be used to
+# answer the question in bulk.
+live_instances="$(g compute instances list --format='value(zone.basename(),name)' \
+    | awk '{print $1 "/" $2}')"
+
+# Instance URLs look like
+#   https://www.googleapis.com/compute/v1/projects/P/zones/Z/instances/N
+# Comparing zone/name rather than the whole URL keeps this working
+# whichever host or API version the URL happens to carry.
+instance_key() {
+    local url="$1" name zone
+    name="${url##*/}"
+    zone="${url%/instances/*}"
+    zone="${zone##*/}"
+    printf '%s/%s' "$zone" "$name"
+}
+
+instance_live() { printf '%s\n' "$live_instances" | grep -qx "$1"; }
+
+# --- hubs and spokes ----------------------------------------------------
+
+hubs="$(g network-connectivity hubs list --format='value(name,state)' || true)"
+
+if [ -z "$hubs" ]; then
+    info "No Network Connectivity Center (NCC) hubs."
+else
+    info "Network Connectivity Center (NCC) hubs:"
+    while read -r hub state; do
+        [ -n "$hub" ] || continue
+        marker=""
+        [ -n "$mine" ] && [ "$hub" = "$mine-bgp-hub" ] && marker="   <- this cluster"
+        info "  $hub  $state$marker"
+
+        # A spoke is regional and there is no region column. The region
+        # is in the resource path, but value(name) prints the bare name
+        # rather than the path -- the JSON shows the full thing, which
+        # is what makes deriving the region from $name look like it
+        # ought to work. segment(-3) reaches into the path itself:
+        #   projects/P/locations/REGION/spokes/NAME
+        spokes="$(g network-connectivity spokes list \
+            --filter="hub:$hub" \
+            --format='value(name,name.segment(-3),state,spokeType)' || true)"
+
+        if [ -z "$spokes" ]; then
+            info "    (no spokes)"
+        fi
+
+        while read -r sname sregion sstate stype; do
+            [ -n "$sname" ] || continue
+            info "    spoke $sname  $sregion  $sstate  $stype"
+
+            # Not `|| true`. A describe that fails and a spoke with no
+            # members are different answers, and collapsing them prints
+            # an empty membership for a spoke that is actually full --
+            # which is precisely how the wrong --region here went
+            # unnoticed until the output was read closely.
+            if ! members="$(g network-connectivity spokes describe "$sname" \
+                --region="$sregion" \
+                --flatten='linkedRouterApplianceInstances.instances[]' \
+                --format='value(linkedRouterApplianceInstances.instances.ipAddress,linkedRouterApplianceInstances.instances.virtualMachine)' 2>&1)"; then
+                warn "      could not read spoke members:"
+                explain "$members"
+                members=""
+            fi
+
+            [ -n "$members" ] || info "      (no members)"
+
+            while read -r ip vm; do
+                [ -n "$vm" ] || continue
+                key="$(instance_key "$vm")"
+                if instance_live "$key"; then
+                    info "      $ip  $key"
+                else
+                    info "      $ip  $key  (GONE - orphaned)"
+                fi
+            done < <(printf '%s\n' "$members")
+        done < <(printf '%s\n' "$spokes")
+        info ""
+    done < <(printf '%s\n' "$hubs")
+fi
+
+# --- cloud routers ------------------------------------------------------
+
+total_routers="$(g compute routers list --format='value(name)' | grep -c . || true)"
+routers="$(g compute routers list --filter='bgp.asn:*' \
+    --format='value(name,region.basename(),bgp.asn,network.basename())' || true)"
+
+if [ -z "$routers" ]; then
+    info "No Cloud Routers with a BGP ASN."
+else
+    info "Cloud Routers speaking BGP:"
+    while read -r rname rregion rasn rnet; do
+        [ -n "$rname" ] || continue
+        marker=""
+        [ -n "$mine" ] && [ "$rname" = "$mine-bgp-router" ] && marker="   <- this cluster"
+        info "  $rname  $rregion  asn=$rasn  network=$rnet$marker"
+
+        while read -r iname irange iredundant; do
+            [ -n "$iname" ] || continue
+            info "    interface $iname  $irange  redundant=${iredundant:-none}"
+        done < <(g compute routers describe "$rname" --region="$rregion" \
+            --flatten='interfaces[]' \
+            --format='value(interfaces.name,interfaces.ipRange,interfaces.redundantInterface)' 2>/dev/null || true)
+
+        # Session state lives on get-status, not describe, and a router
+        # with no peers returns nothing rather than an empty list.
+        status="$(g compute routers get-status "$rname" --region="$rregion" \
+            --flatten='result.bgpPeerStatus[]' \
+            --format='value(result.bgpPeerStatus.name,result.bgpPeerStatus.state,result.bgpPeerStatus.status,result.bgpPeerStatus.numLearnedRoutes)' 2>/dev/null || true)"
+
+        peer_state() {
+            printf '%s\n' "$status" | awk -v n="$1" '$1 == n {print $2, $3, $4; found=1} END {if (!found) print "?", "?", "?"}'
+        }
+
+        while read -r pname piface pip ppeerip pasn pvm; do
+            [ -n "$pname" ] || continue
+            read -r pstate pstatus plearned <<<"$(peer_state "$pname")"
+            info "    peer $pname  $piface  $pip -> $ppeerip  asn=$pasn  $pstatus/$pstate  learned=$plearned"
+            if [ -n "$pvm" ]; then
+                key="$(instance_key "$pvm")"
+                instance_live "$key" || info "      instance $key  (GONE - orphaned peer)"
+            fi
+        done < <(g compute routers describe "$rname" --region="$rregion" \
+            --flatten='bgpPeers[]' \
+            --format='value(bgpPeers.name,bgpPeers.interfaceName,bgpPeers.ipAddress,bgpPeers.peerIpAddress,bgpPeers.peerAsn,bgpPeers.routerApplianceInstance)' 2>/dev/null || true)
+        info ""
+    done < <(printf '%s\n' "$routers")
+fi
+
+shown="$(printf '%s\n' "$routers" | grep -c . || true)"
+hidden=$((total_routers - shown))
+[ "$hidden" -gt 0 ] && info "$hidden Cloud Router(s) carry no BGP ASN and are not shown; those are Cloud NAT."
+
+exit 0

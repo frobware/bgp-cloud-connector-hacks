@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# Tear down what gcp-create-cloud-router built: the Cloud Router with
+# its interfaces and BGP peers, the router appliance spoke, the
+# Network Connectivity Center (NCC) hub, and the firewall rule that
+# lets the sessions form.
+#
+#   gcp-delete-cloud-router --dry-run
+#   gcp-delete-cloud-router
+#
+# Normally it identifies what to delete from the running cluster. Once
+# the cluster is gone there is nothing to ask, so name it:
+#
+#   INFRA=mycluster-abcde GCP_REGION=us-east1 GCP_PROJECT=openshift-qe \
+#       gcp-delete-cloud-router
+#
+# Everything it touches is named <infra>-bgp-*, so it cannot take out
+# the installer's own <infra>-network-router, which carries Cloud NAT
+# and belongs to gcp-destroy-cluster.
+#
+# Order is the reverse of creation, and it matters: a hub will not go
+# while a spoke hangs off it. Deleting the Cloud Router takes its
+# interfaces and BGP peers with it, so those need no separate step.
+#
+# canIpForward is deliberately left enabled on the router nodes. It is
+# a property of the instances rather than of any of this, undoing it
+# means the same whole-instance PUT that setting it did, and leaving
+# forwarding permitted on a node breaks nothing. aws-delete-route-servers
+# leaves SourceDestCheck alone for the same reason.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gcp-lib.bash"
+
+parse_args_only_common "$@"
+require_cmd gcloud
+
+# Each of the three can come from the environment or from a running
+# cluster. Reading them one at a time rather than all-or-nothing means
+# GCP_PROJECT set in .envrc.local still works with a live cluster
+# supplying the other two.
+infra="${INFRA:-}"
+region="${GCP_REGION:-}"
+project="${GCP_PROJECT:-}"
+
+if [ -z "$infra" ] || [ -z "$region" ] || [ -z "$project" ]; then
+    if oc whoami >/dev/null 2>&1; then
+        : "${infra:=$(oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}' 2>/dev/null || true)}"
+        : "${region:=$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.gcp.region}' 2>/dev/null || true)}"
+        : "${project:=$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.gcp.projectID}' 2>/dev/null || true)}"
+    fi
+fi
+
+[ -n "$infra" ] && [ -n "$region" ] && [ -n "$project" ] || \
+    die "could not determine the cluster, region and project" \
+        "No cluster is reachable, or it is not a GCP one. Name them:" \
+        "  INFRA=<infra-id> GCP_REGION=<region> GCP_PROJECT=<project> ${0##*/}" \
+        "Got: infra='${infra:-}' region='${region:-}' project='${project:-}'"
+
+export GCP_PROJECT="$project"
+require_gcp
+
+hub="$infra-bgp-hub"
+spoke="$infra-bgp-spoke"
+router="$infra-bgp-router"
+fw="$infra-bgp"
+
+# Queries only. Anything that mutates spells out gcloud so --dry-run
+# prints a command you can paste.
+g() { gcloud --project="$project" "$@"; }
+
+router_exists() { g compute routers describe "$router" --region="$region" >/dev/null 2>&1; }
+spoke_exists()  { g network-connectivity spokes describe "$spoke" --region="$region" >/dev/null 2>&1; }
+hub_exists()    { g network-connectivity hubs describe "$hub" >/dev/null 2>&1; }
+fw_exists()     { g compute firewall-rules describe "$fw" >/dev/null 2>&1; }
+
+info "Cluster: $infra"
+info "Project: $project"
+info "Region:  $region"
+info ""
+
+# Say what is there before touching any of it, so a run against the
+# wrong cluster is obvious from the first few lines rather than from
+# the wreckage.
+found=0
+info "Will delete:"
+if router_exists; then
+    peers="$(g compute routers describe "$router" --region="$region" \
+        --format='value(bgpPeers[].name)' 2>/dev/null | tr ';,' '\n' | grep -c . || true)"
+    info "  Cloud Router $router (with its interfaces and $peers BGP peer(s))"
+    found=$((found + 1))
+else
+    info "  (no Cloud Router $router)"
+fi
+if spoke_exists; then
+    info "  spoke $spoke"
+    found=$((found + 1))
+else
+    info "  (no spoke $spoke)"
+fi
+if hub_exists; then
+    info "  hub $hub"
+    found=$((found + 1))
+else
+    info "  (no hub $hub)"
+fi
+if fw_exists; then
+    info "  firewall rule $fw"
+    found=$((found + 1))
+else
+    info "  (no firewall rule $fw)"
+fi
+info ""
+
+if [ "$found" -eq 0 ]; then
+    info "Nothing to do."
+    exit 0
+fi
+
+# --quiet throughout: gcloud asks "Do you want to continue (Y/n)?" on a
+# delete, and a script that blocks on stdin in a pipeline hangs rather
+# than failing, which is worse than either outcome.
+
+delete_router() {
+    router_exists || { info "  already gone"; return 0; }
+    try gcloud --project="$project" compute routers delete "$router" --region="$region" --quiet
+}
+
+delete_spoke() {
+    spoke_exists || { info "  already gone"; return 0; }
+    try gcloud --project="$project" network-connectivity spokes delete "$spoke" --region="$region" --quiet
+}
+
+delete_hub() {
+    hub_exists || { info "  already gone"; return 0; }
+    try gcloud --project="$project" network-connectivity hubs delete "$hub" --quiet
+}
+
+delete_fw() {
+    fw_exists || { info "  already gone"; return 0; }
+    try gcloud --project="$project" compute firewall-rules delete "$fw" --quiet
+}
+
+# phase, not step: teardown carries on past a failure and reports at the
+# end. Stopping at the first error is how the other two get orphaned.
+phase "Cloud Router $router" delete_router
+phase "spoke $spoke" delete_spoke
+phase "hub $hub" delete_hub
+phase "firewall rule $fw" delete_fw
+
+if [ "$dry_run" = false ] && [ "$(failure_count)" = "0" ]; then
+    cat <<EOF
+canIpForward is still enabled on the router nodes. Nothing here undoes
+it, and nothing needs to. To put a node back as the installer left it:
+
+  gcp-list-cloud-router   # confirm the BGP side is really gone first
+
+Then the whole-instance PUT in reverse, per node. There is no gcloud
+flag for it.
+
+EOF
+fi
+
+report
