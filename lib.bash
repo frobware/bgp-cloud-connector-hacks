@@ -29,10 +29,17 @@ info() { printf '%s\n' "$*"; }
 
 # Stop now. For preconditions, not for step failures -- a step failure
 # that should not stop the run belongs in `phase`.
+#
+# Arguments after the first are advice, indented one level. An argument
+# spanning several lines is indented line by line, so a block of output
+# quoted back from some other command keeps its shape.
 die() {
     printf 'Error: %s\n' "$1" >&2
     shift
-    for line in "$@"; do printf '  %s\n' "$line" >&2; done
+    local line
+    for arg in "$@"; do
+        while IFS= read -r line; do printf '  %s\n' "$line" >&2; done <<<"$arg"
+    done
     exit 1
 }
 
@@ -89,6 +96,21 @@ try() {
         return 0
     fi
     "$@"
+}
+
+# The counterpart to `try`: run a command for what it has to say rather
+# than for its effect. Puts everything it wrote in the named variable
+# and returns its status, so the caller can decide whether any of it is
+# worth repeating.
+#
+#   local out
+#   capture out gcloud projects describe "$p" || die "no" "$out"
+#
+# Reach for this wherever the alternative is to throw the output away
+# and then guess in the error message why the command failed.
+capture() {
+    local -n _capture_out="$1"; shift
+    _capture_out="$("$@" 2>&1)"
 }
 
 # Poll a predicate until it succeeds, or give up and say so.
@@ -148,16 +170,33 @@ step() {
     info "  ok ($((SECONDS - start))s)"
 }
 
+# Repeat a captured block underneath the line that reported it,
+# indented far enough to read as evidence rather than as more checks.
+# Silent commands produce nothing rather than an empty block.
+explain() {
+    [ -n "$1" ] || return 0
+    local line
+    while IFS= read -r line; do warn "        $line"; done <<<"$1"
+}
+
 # Run a check, remember whether it passed, always return 0 so a run of
 # checks reports everything wrong at once instead of one thing per
 # invocation. Pair with abort_if_failed.
+#
+# A failing check repeats whatever the command said. Predicates should
+# therefore let their output through rather than silencing it
+# themselves: a check that can only say FAIL leaves you guessing, which
+# is how a 503 gets read as an expired credential. Passing checks stay
+# quiet, because preflight prints twenty of them.
 check() {
     local desc="$1"; shift
-    if "$@" >/dev/null 2>&1; then
+    local out
+    if capture out "$@"; then
         info "  ok    $desc"
     else
         _failures+=("$desc")
         warn "  FAIL  $desc"
+        explain "$out"
     fi
     return 0
 }
@@ -166,10 +205,12 @@ check() {
 # stopping for.
 check_warn() {
     local desc="$1"; shift
-    if "$@" >/dev/null 2>&1; then
+    local out
+    if capture out "$@"; then
         info "  ok    $desc"
     else
         warn "  WARN  $desc"
+        explain "$out"
     fi
     return 0
 }
