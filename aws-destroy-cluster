@@ -84,7 +84,31 @@ if [ -f "$facts" ]; then
     [ -n "$cluster_name" ] || cluster_name="$(read_fact "$facts" ccoctl_name)"
     [ -n "$cluster_name" ] || cluster_name="$(read_fact "$facts" cluster_name)"
     [ -n "$infra" ] || infra="$(read_fact "$facts" infra_id)"
-    : "${AWS_REGION:=$(read_fact "$facts" region)}"
+    # AWS_REGION is not like CLUSTER_NAME and INFRA. Those are set for
+    # one invocation and nothing else writes them, so letting the caller
+    # win is right. AWS_REGION is exported by .envrc into every shell,
+    # so ":=" let an ambient us-west-2 quietly beat the us-east-2 this
+    # cluster was built in.
+    #
+    # The cluster still came down, because openshift-install reads the
+    # region out of metadata.json and ignores the variable. Everything
+    # around it went to the wrong region: ccoctl looked for an S3 bucket
+    # that lives elsewhere, did not find it, and the run reported
+    # success while the bucket stayed. The route server check and the
+    # leftovers audit answered for a region they never inspected, and
+    # "nothing found" reads exactly like "nothing left".
+    #
+    # So the recorded region wins. Say so when the environment
+    # disagreed rather than discarding it in silence, because the one
+    # case that is not a stale .envrc is somebody who meant it.
+    facts_region="$(read_fact "$facts" region)"
+    if [ -n "$facts_region" ]; then
+        if [ -n "${AWS_REGION:-}" ] && [ "$AWS_REGION" != "$facts_region" ]; then
+            warn "AWS_REGION is $AWS_REGION, but $facts records $facts_region."
+            warn "Using $facts_region, which is where this cluster was built."
+        fi
+        AWS_REGION="$facts_region"
+    fi
     [ -n "$cluster_name" ] && echo "Read identifiers from $facts"
 fi
 
@@ -96,7 +120,17 @@ if [ -z "$cluster_name" ] || [ -z "$infra" ]; then
         # metadata.json then sends phase 3 to ccoctl delete --name null.
         [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName // empty' "$metadata")"
         [ -n "$infra" ] || infra="$(jq -r '.infraID // empty' "$metadata")"
-        : "${AWS_REGION:=$(jq -r '.aws.region // empty' "$metadata")}"
+        # Same precedence as the facts file above, and for the same
+        # reason: the installer wrote this region, the environment
+        # merely happens to carry one.
+        meta_region="$(jq -r '.aws.region // empty' "$metadata")"
+        if [ -n "$meta_region" ]; then
+            if [ -n "${AWS_REGION:-}" ] && [ "$AWS_REGION" != "$meta_region" ]; then
+                warn "AWS_REGION is $AWS_REGION, but $metadata records $meta_region."
+                warn "Using $meta_region, which is where this cluster was built."
+            fi
+            AWS_REGION="$meta_region"
+        fi
     fi
 fi
 
