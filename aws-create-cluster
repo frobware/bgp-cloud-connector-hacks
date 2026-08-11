@@ -179,15 +179,20 @@ hosted_zone_exists() {
         | grep -q hostedzone
 }
 
+# These two fail closed. The listing's status is tested before its
+# output, because otherwise a throttle, a missing permission or a
+# transient error yields no output, reads as "free", and the collision
+# it was meant to catch surfaces twenty minutes into the install
+# instead -- the late failure this preflight exists to prevent.
 oidc_bucket_free() {
     local n
-    n="$(aws s3api list-buckets --query "Buckets[?Name=='${1}-oidc'].Name" --output text 2>/dev/null)"
+    n="$(aws s3api list-buckets --query "Buckets[?Name=='${1}-oidc'].Name" --output text)" || return 1
     [ -z "$n" ]
 }
 
 iam_roles_free() {
     local n
-    n="$(aws iam list-roles --query "Roles[?starts_with(RoleName,'${1}-')].RoleName" --output text 2>/dev/null)"
+    n="$(aws iam list-roles --query "Roles[?starts_with(RoleName,'${1}-')].RoleName" --output text)" || return 1
     [ -z "$n" ]
 }
 
