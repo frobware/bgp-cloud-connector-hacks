@@ -145,7 +145,9 @@ installer_reports_release() {
     "$installer" version 2>/dev/null | grep -q 'release image'
 }
 
-aws_identity_ok() { aws sts get-caller-identity >/dev/null 2>&1; }
+# Only the identity document is noise. Whatever aws says about a
+# failure belongs to the caller, which prints it under the failed check.
+aws_identity_ok() { aws sts get-caller-identity >/dev/null; }
 
 # openshift-install resolves credentials through the SDK chain, not
 # through our --profile flags, so prove the exported profile is the one
@@ -173,7 +175,7 @@ config_control_plane_replicas() {
 hosted_zone_exists() {
     local domain="$1"
     aws route53 list-hosted-zones \
-        --query "HostedZones[?Name=='${domain}.'].Id" --output text 2>/dev/null \
+        --query "HostedZones[?Name=='${domain}.'].Id" --output text \
         | grep -q hostedzone
 }
 
