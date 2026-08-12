@@ -67,9 +67,13 @@ project="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.gc
 export GCP_PROJECT="$project"
 require_gcp
 
-hub="$infra-bgp-hub"
+# Names match modules/osd-bgp-routing in rh-mobb/osd-gcp-cudn-routing, so
+# that a cluster built by hand and one built by the Terraform present the
+# operator with the same estate, and so that running the Terraform later
+# adopts what is here rather than building a second set alongside it.
+hub="$infra-ncc-hub"
 spoke="$infra-bgp-spoke"
-router="$infra-bgp-router"
+router="$infra-cudn-cr"
 
 # GCP BGP peers and Cloud Router interfaces are fields inside the
 # router resource, not resources in their own right, so they cannot
@@ -77,6 +81,9 @@ router="$infra-bgp-router"
 # -- weaker than the AWS managed-by tag, and the reason this script
 # never touches a peer whose name does not start with it.
 peer_prefix="cudn-bgp"
+
+# Cloud Router interface names, again matching the Terraform.
+iface_prefix="$infra-cr-if"
 
 # For queries only. Anything that mutates spells out `gcloud
 # --project=...` so that --dry-run prints a command you can paste,
@@ -289,7 +296,7 @@ existing_ifaces="$(g compute routers describe "$router" --region="$region" \
     --format='value(interfaces[].name)' 2>/dev/null | tr ';,' '\n' | grep . || true)"
 
 for i in 0 1; do
-    iface="$peer_prefix-if-$i"
+    iface="$iface_prefix-$i"
     if printf '%s\n' "$existing_ifaces" | grep -qx "$iface"; then
         info "  interface $iface already exists"
         continue
@@ -301,7 +308,7 @@ for i in 0 1; do
     else
         try gcloud --project="$project" compute routers add-interface "$router" \
             --region="$region" --interface-name="$iface" --subnetwork="$subnet" \
-            --redundant-interface="$peer_prefix-if-0"
+            --redundant-interface="$iface_prefix-0"
     fi
 done
 info ""
@@ -317,13 +324,19 @@ info ""
 # Sourced from the two interface addresses rather than the whole subnet,
 # because those are the only addresses a Cloud Router peers from, and a
 # rule saying so documents itself.
-fw="$infra-bgp"
+# The Terraform calls this <cluster>-bgp-worker-subnet at priority 900 and
+# sources it from the whole worker subnet. The name and priority are matched
+# because they are observable; the source range is deliberately left narrower,
+# at the two interface addresses, because those are the only addresses a Cloud
+# Router peers from and a rule that says so documents itself.
+fw="$infra-bgp-worker-subnet"
+fw_priority=900
 
 if g compute firewall-rules describe "$fw" >/dev/null 2>&1; then
     info "Adopting existing firewall rule $fw"
 elif [ "$dry_run" = true ]; then
     info "Creating firewall rule $fw..."
-    info "  would run: gcloud --project=$project compute firewall-rules create $fw --network=$network --direction=INGRESS --action=allow --rules=tcp:179 --source-ranges=<interface addresses> --target-tags=$node_tag"
+    info "  would run: gcloud --project=$project compute firewall-rules create $fw --network=$network --direction=INGRESS --action=allow --rules=tcp:179 --source-ranges=<interface addresses> --priority=$fw_priority --target-tags=$node_tag"
 else
     # Read the addresses back rather than assuming: they are allocated
     # by GCP unless pinned, and this runs after the interfaces exist.
@@ -338,6 +351,7 @@ else
         try gcloud --project="$project" compute firewall-rules create "$fw" \
             --network="$network" --direction=INGRESS --action=allow \
             --rules=tcp:179 --source-ranges="$fw_sources" \
+            --priority="$fw_priority" \
             --target-tags="$node_tag" \
             --description="BGP from the Cloud Router interfaces to the router nodes"
     fi

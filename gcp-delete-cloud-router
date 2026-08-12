@@ -60,14 +60,39 @@ fi
 export GCP_PROJECT="$project"
 require_gcp
 
-hub="$infra-bgp-hub"
+# Current names follow the Terraform; the previous ones are still removed so
+# that an estate built before the rename does not become unreachable to this
+# script and have to be cleaned up by hand.
+hub="$infra-ncc-hub"
 spoke="$infra-bgp-spoke"
-router="$infra-bgp-router"
-fw="$infra-bgp"
+router="$infra-cudn-cr"
+fw="$infra-bgp-worker-subnet"
+
+legacy_hub="$infra-bgp-hub"
+legacy_router="$infra-bgp-router"
+legacy_fw="$infra-bgp"
 
 # Queries only. Anything that mutates spells out gcloud so --dry-run
 # prints a command you can paste.
 g() { gcloud --project="$project" "$@"; }
+
+# An estate is built under one naming scheme or the other, never both, so
+# falling back to the previous name when the current one is absent is enough
+# to keep older estates removable without teaching every step two names.
+resolve_name() {
+    local current="$1" legacy="$2"; shift 2
+    if "$@" "$current" >/dev/null 2>&1; then printf '%s' "$current"; return; fi
+    if "$@" "$legacy" >/dev/null 2>&1; then printf '%s' "$legacy"; return; fi
+    printf '%s' "$current"
+}
+
+describe_router() { g compute routers describe "$1" --region="$region"; }
+describe_hub()    { g network-connectivity hubs describe "$1"; }
+describe_fw()     { g compute firewall-rules describe "$1"; }
+
+router="$(resolve_name "$router" "$legacy_router" describe_router)"
+hub="$(resolve_name "$hub" "$legacy_hub" describe_hub)"
+fw="$(resolve_name "$fw" "$legacy_fw" describe_fw)"
 
 router_exists() { g compute routers describe "$router" --region="$region" >/dev/null 2>&1; }
 spoke_exists()  { g network-connectivity spokes describe "$spoke" --region="$region" >/dev/null 2>&1; }
