@@ -7,6 +7,7 @@
 #
 #   gcp-delete-cloud-router --dry-run
 #   gcp-delete-cloud-router
+#   gcp-delete-cloud-router --delete-spokes
 #
 # Normally it identifies what to delete from the running cluster. Once
 # the cluster is gone there is nothing to ask, so name it:
@@ -32,7 +33,15 @@ set -euo pipefail
 
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gcp-lib.bash"
 
-parse_args_only_common "$@"
+delete_spokes=false
+
+parse_common_args "$@"
+for arg in "${rest[@]+"${rest[@]}"}"; do
+    case "$arg" in
+        --delete-spokes) delete_spokes=true ;;
+        *) die "unknown option: $arg" "Usage: ${0##*/} [--dry-run] [--delete-spokes]" ;;
+    esac
+done
 require_cmd gcloud
 
 # Each of the three can come from the environment or from a running
@@ -151,9 +160,50 @@ delete_router() {
     try gcloud --project="$project" compute routers delete "$router" --region="$region" --quiet
 }
 
+# Every spoke on the hub, whoever made it. The operator names its own
+# {spokePrefix}-N and shards across them, so the one this script used to
+# create is not the whole story, and a hub with any spoke left on it cannot
+# be deleted.
+hub_spokes() {
+    g network-connectivity spokes list \
+        --filter="hub:$hub" --format='value(name.basename())' 2>/dev/null | grep . || true
+}
+
+# The operator owns its spokes: it creates them, shards them across the
+# eight-instance limit and garbage collects them. Deleting them from here is
+# reaching past the owner, and on a live cluster it does not even work, since
+# the next reconcile puts them back and the hub delete fails anyway.
+#
+# So refuse and say what to do, which is also what terraform destroy does with
+# a hub whose spokes are not in its state: fail with a reason. The exception is
+# the cluster having gone, where no operator remains to clean up and these are
+# stranded with nothing else able to remove them. That is what --delete-spokes
+# is for, and why it is not the default.
 delete_spoke() {
-    spoke_exists || { info "  already gone"; return 0; }
-    try gcloud --project="$project" network-connectivity spokes delete "$spoke" --region="$region" --quiet
+    local spokes
+    spokes="$(hub_spokes)"
+
+    if [ -z "$spokes" ]; then
+        info "  no spokes on $hub"
+        return 0
+    fi
+
+    if [ "$delete_spokes" = false ]; then
+        warn "  spokes still attached to $hub:"
+        printf '%s\n' "$spokes" | sed 's/^/    /' >&2
+        warn "  These belong to the operator. Delete the CUDNBgpConfig and let it"
+        warn "  withdraw them, then rerun. If the cluster has gone and nothing is"
+        warn "  left to do that, rerun with --delete-spokes."
+        fail "spokes still attached to $hub"
+        return 0
+    fi
+
+    while read -r sp; do
+        [ -n "$sp" ] || continue
+        info "  deleting spoke $sp"
+        try gcloud --project="$project" network-connectivity spokes delete "$sp" \
+            --region="$region" --quiet
+    done <<<"$spokes"
 }
 
 delete_hub() {
@@ -169,7 +219,7 @@ delete_fw() {
 # phase, not step: teardown carries on past a failure and reports at the
 # end. Stopping at the first error is how the other two get orphaned.
 phase "Cloud Router $router" delete_router
-phase "spoke $spoke" delete_spoke
+phase "spokes on $hub" delete_spoke
 phase "hub $hub" delete_hub
 phase "firewall rule $fw" delete_fw
 
