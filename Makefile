@@ -25,8 +25,7 @@ test: ## go test the Go helpers
 	go test ./...
 
 .PHONY: fmt
-fmt: ## reformat the scripts with shfmt and the Go with gofmt
-	shfmt -w -i 4 -ci $(scripts)
+fmt: ## gofmt the Go sources
 	gofmt -w $$(go list -f '{{.Dir}}' ./...)
 
 .PHONY: list
