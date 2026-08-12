@@ -36,7 +36,7 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gcp-lib.bash"
 
 asn="${ASN:-65000}"
 local_asn="${LOCAL_ASN:-65001}"
-router_node_label="${ROUTER_NODE_LABEL:-bgp_router=true}"
+router_node_label="${ROUTER_NODE_LABEL:-networking.openshift.io/cudn-bgp-router=}"
 
 parse_args_only_common "$@"
 require_cmd gcloud oc curl python3

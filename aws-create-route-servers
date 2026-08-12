@@ -274,5 +274,5 @@ Put this in your CUDNBgpConfig:
 Still needed before the operator can reconcile: label the router
 nodes with the key your spec.routerNodeSelector uses, e.g.
 
-  oc label node <node> bgp_router=true
+  oc label node <node> networking.openshift.io/cudn-bgp-router=
 EOF
