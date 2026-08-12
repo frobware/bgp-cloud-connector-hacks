@@ -112,6 +112,22 @@ for rs in $servers; do
         fi
     done
 
+    # Propagation is shown because its absence is silent: peers reach
+    # available, sessions establish, and the routes never leave the route
+    # server. A route server with none is almost certainly broken.
+    propagations="$(aws ec2 get-route-server-propagations --route-server-id "$rs" \
+        --query "RouteServerPropagations[?State!='deleted'].[RouteTableId,State]" \
+        --output text 2>/dev/null || true)"
+
+    if [ -z "$propagations" ]; then
+        echo "    propagation: NONE - learned routes reach no route table"
+    else
+        while read -r rt pstate; do
+            [ -n "$rt" ] || continue
+            echo "    propagates to $rt  $pstate"
+        done <<<"$propagations"
+    fi
+
     endpoints="$(jq -r --arg rs "$rs" \
         ".RouteServerEndpoints[] | select(.RouteServerId == \$rs) | select($live) | .RouteServerEndpointId" \
         <<<"$endpoints_json")"

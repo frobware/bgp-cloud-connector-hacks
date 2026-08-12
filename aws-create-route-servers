@@ -20,6 +20,18 @@
 # your CUDNBgpConfig. Route server endpoints bill hourly, so tear
 # them down when you are finished.
 #
+# What this builds tracks rh-mobb/rosa-bgp's vpc1-rs1.tf, because a
+# cluster built by hand and one built by the Terraform should present
+# the operator with the same estate. That means two endpoints per
+# subnet rather than one, and propagation onto every route table.
+#
+# Propagation is the one that hides. Without it every peer reaches
+# available, every BGP session establishes, FRR advertises the CUDN
+# prefix, and the routes stay inside the route server: nothing in the
+# VPC can reach a pod while every signal says healthy. Set
+# ENDPOINTS_PER_SUBNET=1 for a cheaper throwaway, knowing it halves
+# the redundancy the reference has.
+#
 # Rerunning adopts what already exists rather than creating a second
 # set, so it is safe as a check on the current state.
 
@@ -28,6 +40,7 @@ set -euo pipefail
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/aws-lib.bash"
 
 asn="${ASN:-65000}"
+endpoints_per_subnet="${ENDPOINTS_PER_SUBNET:-2}"
 
 parse_args_only_common "$@"
 require_cmd aws oc
@@ -161,23 +174,59 @@ for entry in $subnets; do
     # filtered like the route server adoption above: a deleted endpoint
     # keeps being returned, and adopting the tombstone here means
     # "already exists" for an endpoint that never gets recreated.
-    existing="$(aws ec2 describe-route-server-endpoints \
-        --query "RouteServerEndpoints[?RouteServerId=='$rs' && SubnetId=='$subnet' && State!='deleted' && State!='deleting'].RouteServerEndpointId | [0]" \
-        --output text 2>/dev/null || echo None)"
+    #
+    # Counted rather than matched by name: the endpoints in a subnet are
+    # interchangeable, so how many there are is the only question worth
+    # asking, and it makes a rerun after a partial failure top up rather
+    # than duplicate.
+    have="$(aws ec2 describe-route-server-endpoints \
+        --query "length(RouteServerEndpoints[?RouteServerId=='$rs' && SubnetId=='$subnet' && State!='deleted' && State!='deleting'])" \
+        --output text 2>/dev/null || echo 0)"
 
-    if [ "$existing" != "None" ] && [ -n "$existing" ]; then
-        echo "$az: endpoint $existing already exists"
+    if [ "$have" -ge "$endpoints_per_subnet" ]; then
+        echo "$az: $have endpoint(s) already in $subnet"
         continue
     fi
 
-    echo "$az: creating endpoint in $subnet..."
-    try aws ec2 create-route-server-endpoint \
-        --route-server-id "$rs" \
-        --subnet-id "$subnet" \
-        --tag-specifications "ResourceType=route-server-endpoint,Tags=[{Key=Name,Value=$infra-rs-$az}]"
+    for n in $(seq $((have + 1)) "$endpoints_per_subnet"); do
+        echo "$az: creating endpoint $n of $endpoints_per_subnet in $subnet..."
+        try aws ec2 create-route-server-endpoint \
+            --route-server-id "$rs" \
+            --subnet-id "$subnet" \
+            --tag-specifications "ResourceType=route-server-endpoint,Tags=[{Key=Name,Value=$infra-rs-$az-ep$n}]"
+    done
 done
 
 echo
+
+# Propagation onto the route tables. The Terraform covers private and
+# public alike, so this does too: a route server that peers but
+# propagates nowhere is the failure this whole script exists to avoid,
+# and it is invisible from the cluster.
+route_tables="$(aws ec2 describe-route-tables \
+    --filters "Name=vpc-id,Values=$vpc" \
+    --query 'RouteTables[].RouteTableId' --output text 2>/dev/null | tr '\t' '\n' | grep . || true)"
+
+if [ -z "$route_tables" ]; then
+    warn "No route tables found in $vpc; nothing to propagate to."
+else
+    propagated="$(aws ec2 get-route-server-propagations --route-server-id "$rs" \
+        --query "RouteServerPropagations[?State!='deleted' && State!='deleting'].RouteTableId" \
+        --output text 2>/dev/null | tr '\t' '\n' | grep . || true)"
+
+    echo "Route server propagation:"
+    for rt in $route_tables; do
+        if printf '%s\n' "$propagated" | grep -qx "$rt"; then
+            echo "  $rt already propagating"
+            continue
+        fi
+        echo "  enabling on $rt..."
+        try aws ec2 enable-route-server-propagation \
+            --route-server-id "$rs" --route-table-id "$rt"
+    done
+fi
+echo
+
 if [ "$dry_run" = true ]; then
     echo "Dry run only, nothing was created."
     exit 0
