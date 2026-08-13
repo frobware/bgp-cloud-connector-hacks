@@ -9,10 +9,8 @@
 #
 # It does more than the AWS script does, and deliberately. There, the
 # operator creates the per-node peers and the script provisions only
-# the static half. There is no GCP support in the operator yet, so
-# until there is, this creates the per-node half too and you rerun it
-# when the nodes change. What it creates is what the operator will
-# eventually have to reconcile.
+# the static half. This creates the per-node half too, which is what
+# you want when driving GCP by hand: rerun it when the nodes change.
 #
 # GCP registers a node twice, and the order matters. A node must be a
 # member of the router appliance spoke before a BGP peer naming it will
