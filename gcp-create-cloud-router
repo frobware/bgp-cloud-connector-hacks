@@ -6,11 +6,23 @@
 #
 #   gcp-create-cloud-router --dry-run
 #   gcp-create-cloud-router
+#   gcp-create-cloud-router --prerequisites-only
 #
 # It does more than the AWS script does, and deliberately. There, the
 # operator creates the per-node peers and the script provisions only
 # the static half. This creates the per-node half too, which is what
 # you want when driving GCP by hand: rerun it when the nodes change.
+#
+# --prerequisites-only builds only the half the operator never creates
+# -- the hub, the Cloud Router with its interfaces, and the firewall
+# rule -- and leaves canIpForward, the spoke and the BGP peers alone.
+#
+# That is the mode the e2e suite wants, and the distinction is not
+# cosmetic. Those three are what the operator itself reconciles, so a
+# run that finds them already built adopts them, reports no change, and
+# passes every assertion it makes. A completely broken operator looks
+# identical. Build the operator's own work for it and the test proves
+# nothing.
 #
 # GCP registers a node twice, and the order matters. A node must be a
 # member of the router appliance spoke before a BGP peer naming it will
@@ -36,7 +48,18 @@ asn="${ASN:-65000}"
 local_asn="${LOCAL_ASN:-65001}"
 router_node_label="${ROUTER_NODE_LABEL:-networking.openshift.io/cudn-bgp-router=}"
 
-parse_args_only_common "$@"
+prerequisites_only=false
+parse_common_args "$@"
+if [ ${#rest[@]} -gt 0 ]; then
+    for arg in "${rest[@]}"; do
+        case "$arg" in
+            --prerequisites-only) prerequisites_only=true ;;
+            *) die "unknown option: $arg" \
+                "Usage: ${0##*/} [--dry-run] [--prerequisites-only]" ;;
+        esac
+    done
+fi
+
 require_cmd gcloud oc curl python3
 
 [ "$asn" != "$local_asn" ] || die "ASN and LOCAL_ASN are both $asn" \
@@ -203,7 +226,10 @@ set_can_ip_forward() {
     info "  $name: set"
 }
 
-if [ -n "$nodes" ]; then
+if [ "$prerequisites_only" = true ]; then
+    info "Skipping canIpForward: --prerequisites-only, the operator sets it"
+    info ""
+elif [ -n "$nodes" ]; then
     info "Enabling canIpForward on the router nodes:"
     while read -r name zone ip; do
         [ -n "$name" ] || continue
@@ -242,7 +268,10 @@ while read -r name zone ip; do
     appliance_args+=(--router-appliance="instance=projects/$project/zones/$zone/instances/$name,ip=$ip")
 done < <(printf '%s\n' "$nodes")
 
-if g network-connectivity spokes describe "$spoke" --region="$region" >/dev/null 2>&1; then
+if [ "$prerequisites_only" = true ]; then
+    info "Skipping spoke $spoke: --prerequisites-only, the operator creates it"
+    info ""
+elif g network-connectivity spokes describe "$spoke" --region="$region" >/dev/null 2>&1; then
     # A spoke's membership is replaced wholesale rather than added to,
     # so an update is how a node join or leave is expressed. Skipping
     # it on a rerun would leave the membership stale, which is exactly
@@ -361,7 +390,10 @@ info ""
 existing_peers="$(g compute routers describe "$router" --region="$region" \
     --format='value(bgpPeers[].name)' 2>/dev/null | tr ';,' '\n' | grep . || true)"
 
-if [ -n "$nodes" ]; then
+if [ "$prerequisites_only" = true ]; then
+    info "Skipping BGP peers: --prerequisites-only, the operator creates them"
+    info ""
+elif [ -n "$nodes" ]; then
     info "BGP peers, two per node:"
     while read -r name zone ip; do
         [ -n "$name" ] || continue
