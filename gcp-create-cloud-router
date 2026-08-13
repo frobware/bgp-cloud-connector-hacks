@@ -408,10 +408,13 @@ elif [ -n "$nodes" ]; then
                 continue
             fi
             info "  adding $peer -> $ip ($name)"
+            # The interface is the one created above, so it is named from
+            # iface_prefix. Naming it from peer_prefix instead pointed at an
+            # interface this script never creates, and the peer was rejected.
             try gcloud --project="$project" compute routers add-bgp-peer "$router" \
                 --region="$region" \
                 --peer-name="$peer" \
-                --interface="$peer_prefix-if-$i" \
+                --interface="$iface_prefix-$i" \
                 --peer-ip-address="$ip" \
                 --peer-asn="$local_asn" \
                 --instance="$name" \
