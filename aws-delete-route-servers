@@ -115,7 +115,29 @@ if [ -z "$infra" ]; then
         echo "If the cluster is gone, name it: INFRA=<name> AWS_REGION=<region> ${0##*/}" >&2
         exit 1
     fi
-    : "${AWS_REGION:=$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.aws.region}')}"
+
+    # The cluster wins over AWS_REGION, for the reason aws-destroy-cluster
+    # spells out: AWS_REGION is exported into every shell, so ":=" let an
+    # ambient us-west-2 quietly beat the us-east-2 a cluster was built in.
+    #
+    # Here that is worse than it is there. Everything below filters on a tag
+    # in one region, so the wrong region finds no route server and reports
+    # "Nothing to do" -- and nothing to do is indistinguishable from nothing
+    # left. You would destroy the cluster believing the estate was clean and
+    # leave a route server, six endpoints and seven propagations behind, in a
+    # VPC that no longer exists. Observed 2026-08-13.
+    #
+    # Say so when the environment disagreed rather than discarding it in
+    # silence, because the one case that is not a stale shell is somebody who
+    # meant it.
+    cluster_region="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.aws.region}' 2>/dev/null || true)"
+    if [ -n "$cluster_region" ]; then
+        if [ -n "${AWS_REGION:-}" ] && [ "$AWS_REGION" != "$cluster_region" ]; then
+            warn "AWS_REGION is $AWS_REGION, but the cluster reports $cluster_region."
+            warn "Using $cluster_region, which is where its route servers are."
+        fi
+        AWS_REGION="$cluster_region"
+    fi
 fi
 
 if [ -z "${AWS_REGION:-}" ]; then
