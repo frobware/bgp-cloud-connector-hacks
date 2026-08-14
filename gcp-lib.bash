@@ -44,15 +44,29 @@ require_gcp() {
     [ -n "${GCP_PROJECT:-}" ] || die "GCP_PROJECT is not set" \
         "Name the project, e.g. in .envrc.local:" \
         "  export GCP_PROJECT=<project-id>"
-    # Repeat what gcloud said rather than guessing why it failed. A
-    # stale refresh token and a 503 from the API fail this probe
-    # identically, so naming invalid_grant unconditionally sends you
-    # off renewing a credential that was working all along.
+    # Repeat what gcloud said rather than guessing why it failed. A stale
+    # refresh token, a 503 and an exhausted read quota fail this probe
+    # identically, so naming any one of them unconditionally sends you off
+    # fixing something that was never wrong.
+    #
+    # The quota one is not hypothetical: cloudresourcemanager.googleapis.com
+    # /read_requests runs out at 2400 and takes the whole teardown down with
+    # it, while the credential is perfectly good. So the advice below is a
+    # test that tells the causes apart rather than a guess at which it is.
     local err
     capture err gcloud projects describe "$GCP_PROJECT" --format='value(projectId)' && return 0
     die "cannot read project $GCP_PROJECT as $(gcloud config get-value account 2>/dev/null)" \
         "gcloud said:" \
         "${err:-(gcloud failed without saying anything)}" \
-        "If that mentions invalid_grant the login has gone stale; renew it:" \
+        "" \
+        "That probe fails the same way whatever the cause, so find out which" \
+        "before changing anything:" \
+        "  gcloud auth print-access-token >/dev/null && echo 'credential is fine'" \
+        "" \
+        "A token that prints means the credential is not the problem. Read the" \
+        "message above for a quota_metric or rateLimitExceeded, which is a rate" \
+        "limit: it clears on its own within a minute, so wait and rerun." \
+        "" \
+        "Only invalid_grant means the login has gone stale:" \
         "  gcloud auth login"
 }
