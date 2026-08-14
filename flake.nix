@@ -33,6 +33,7 @@
           # shell and finding store paths rather than host paths.
           packages = with pkgs; [
             awscli2
+            azure-cli # az, for the azure- scripts
             google-cloud-sdk # gcloud, for the gcp- scripts
             openshift # oc
             jq

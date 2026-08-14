@@ -1,0 +1,541 @@
+#!/usr/bin/env bash
+#
+# Build an OpenShift cluster on Azure, checking things first.
+#
+#   azure-create-cluster --dry-run
+#   azure-create-cluster
+#
+# The shape is gcp-create-cluster's, which is aws-create-cluster's
+# without the credential dance: preflight everything before anything
+# exists, one directory per cluster owning its own binaries, a timestamp
+# name you cannot choose, a facts file for teardown. Azure has no Mint
+# mode at all -- the installer accepts only Passthrough and Manual here
+# -- so the default is Passthrough, the cloud credential operator copies
+# the one service principal into each component, and there is nothing to
+# extract, merge or create before the installer runs.
+#
+# What Azure adds instead is that the service principal is not yours to
+# make. openshift-install reads it from ~/.azure/osServicePrincipal.json
+# and will prompt for the four fields if the file is absent, which is
+# how you get credentials nobody wrote down; the preflight below refuses
+# rather than letting the installer ask. See azure-installer-credentials
+# for what has to be true before that file can exist.
+#
+# The other Azure-shaped trap is the subscription. Your az login has one
+# selected and the credentials file names another, and nothing warns
+# you: the installer uses the file, every check here uses the login, and
+# a preflight that queried the wrong subscription reports a clean bill
+# for a cluster it never looked at. So they are compared, and a
+# disagreement stops the run.
+#
+# Retrying means running it again. That produces a new name and a new
+# directory, so nothing from a failed attempt can leak into the next
+# one, and the failed attempt stays readable.
+#
+# Environment:
+#
+#   CLUSTER_USER          default $USER
+#   CLUSTER               cluster directory, default clusters/azure-<YYMMDDHHMM>-<ocp>
+#   OPENSHIFT_INSTALL     default <cluster>/bin/openshift-install, fetched if absent
+#   OCP_CHANNEL           passed to get-openshift-install, default stable-4.22
+#   INSTALL_CONFIG        a config to copy in; the copy's metadata.name
+#                         is rewritten to the generated cluster name.
+#                         Default: generate one
+#   PULL_SECRET           default ~/.secrets/pull-secret.json
+#   AZURE_AUTH_LOCATION   service principal for the installer,
+#                         default ~/.azure/osServicePrincipal.json
+
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+source "$here/azure-lib.bash"
+
+parse_args_only_common "$@"
+
+# The name is always a timestamp, and there is deliberately no way to
+# supply one; see aws-create-cluster for the full argument. Run twice
+# inside the same minute and you collide, which is yours to resolve.
+short_name="$(date +%y%m%d%H%M)"
+cluster_user="${CLUSTER_USER:-${USER:-$(whoami)}}"
+cluster_name="$cluster_user-$short_name"
+
+# The OCP version goes in the directory name, not the cluster name,
+# same trade as on the other clouds: directory names are free,
+# cluster-name characters are not.
+resolve_ocp_version() {
+    if [ -n "${OPENSHIFT_INSTALL:-}" ] && [ -x "${OPENSHIFT_INSTALL:-}" ]; then
+        "$OPENSHIFT_INSTALL" version 2>/dev/null | head -1 | awk '{print $2}'
+        return 0
+    fi
+    "$here/get-openshift-install" --print-version 2>/dev/null
+}
+
+ocp_version="$(resolve_ocp_version || true)"
+
+[ -n "$ocp_version" ] || die "could not determine the OCP version" \
+    "get-openshift-install --print-version returned nothing." \
+    "Check the VPN, the mirror, and OCP_CHANNEL (currently ${OCP_CHANNEL:-stable-4.22})." \
+    "Or set OPENSHIFT_INSTALL to a binary you already have."
+
+ocp_tag="$(printf '%s' "$ocp_version" | tr -d '.')"
+
+# azure- in the directory name, because clusters/ mixes clouds and the
+# directory is how you tell which teardown script a cluster wants.
+cluster_dir="${CLUSTER:-$here/clusters/azure-$short_name-$ocp_tag}"
+bin_dir="$cluster_dir/bin"
+pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
+creds_file="$(azure_credentials_file)"
+
+installer="${OPENSHIFT_INSTALL:-$bin_dir/openshift-install}"
+
+# ---------------------------------------------------------------------
+# Predicates. Each answers one question and says nothing about what to
+# do when the answer is no, so they compose into check and wait_until.
+# ---------------------------------------------------------------------
+
+creds_field() { jq -r --arg k "$1" '.[$k] // empty' "$creds_file" 2>/dev/null; }
+
+# The installer treats a file with no clientSecret and no certificate as
+# a request to authenticate as a managed identity, which on a laptop
+# means a long wait and an opaque failure. Naming the missing field here
+# turns that into a preflight line.
+creds_are_a_service_principal() {
+    local missing=()
+    for k in subscriptionId tenantId clientId clientSecret; do
+        [ -n "$(creds_field "$k")" ] || missing+=("$k")
+    done
+    [ ${#missing[@]} -eq 0 ] && return 0
+    printf '%s is missing: %s\n' "$creds_file" "${missing[*]}" >&2
+    return 1
+}
+
+# The installer will use the file's subscription whatever az is pointed
+# at, so a mismatch means every check below inspected somewhere else.
+subscription_agrees() {
+    local from_file from_cli
+    from_file="$(creds_field subscriptionId)"
+    from_cli="$(azure_active_subscription)"
+    [ -n "$from_cli" ] || { echo "az account show returned no subscription" >&2; return 1; }
+    [ "$from_file" = "$from_cli" ] && return 0
+    printf 'credentials name %s, az is on %s\n' "$from_file" "$from_cli" >&2
+    printf 'az account set --subscription %s\n' "$from_file" >&2
+    return 1
+}
+
+config_is_yaml() { python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$1"; }
+
+# Passthrough is the point of this script, and on Azure it is also the
+# only alternative to Manual. A config carrying Manual would install
+# with no credential manifests at all, and that wedges bootstrap the
+# same way the AWS trap does -- Secrets that never arrive, retried
+# forever. The optional quote matters: YAML accepts Manual, "Manual" and
+# 'Manual' alike, and a pattern that only knows the bare spelling waves
+# the quoted ones through as though the field were absent.
+config_not_manual() {
+    ! grep -qE '^credentialsMode:[[:space:]]*['"'"'"]?Manual' "$1"
+}
+
+config_has_pull_secret() { grep -q '^pullSecret:' "$1"; }
+config_has_ssh_key()     { grep -q '^sshKey:' "$1"; }
+
+config_base_domain() { grep -E '^baseDomain:' "$1" | awk '{print $2}' | head -1; }
+
+# Anchored on the platform block's two-space "azure:", which the
+# machine pools' four-space one cannot match, so a worker pool's type
+# can never be read as the cluster's region.
+config_azure_field() {
+    awk -v k="$2:" '/^  azure:/{f=1;next} /^[^ ]/{f=0} f && $1==k {print $2; exit}' "$1"
+}
+
+config_control_plane_replicas() {
+    awk '/^controlPlane:/{f=1} f&&/^  replicas:/{print $2; exit}' "$1"
+}
+
+# zone_resource_group comes from azure-lib.bash: exact zone name, and it
+# refuses ambiguity, so a failed or ambiguous lookup reads as "no zone"
+# here and the check fails closed.
+dns_zone_exists() { [ -n "$(zone_resource_group "$1")" ]; }
+
+# The Azure analogue of the AWS OIDC-bucket check: records for
+# api.<name>.<domain> mean this name is in use, or was and its destroy
+# never finished.
+#
+# The filtering belongs in --query rather than a grep downstream, and
+# not for tidiness: the QE zone holds getting on for six thousand record
+# sets, which is 140KB of names, and a shell variable that size is over
+# the 128KB a single environment string is allowed. Everything the
+# script execs after filling it dies with "Argument list too long",
+# starting with the grep meant to read it. az does the matching in
+# Python and hands back two lines at most.
+#
+# The listing's status is tested before its output, because otherwise a
+# missing permission or a transient error yields nothing, reads as
+# "free", and the collision it was meant to catch surfaces twenty
+# minutes into the install instead.
+records_free() {
+    local rg="$1" zone="$2" name="$3" out
+    out="$(az network dns record-set list -g "$rg" -z "$zone" \
+        --query "[?name=='api.${name}' || name=='*.apps.${name}'].name" -o tsv)" || return 1
+    [ -z "$out" ]
+}
+
+# The installer puts the whole cluster in <infra-id>-rg, and the infra
+# id starts with the cluster name. A leftover means a previous cluster
+# under this name was not fully destroyed.
+resource_groups_free() {
+    local out
+    out="$(az group list --query "[?starts_with(name, '${1}-')].name" -o tsv)" || return 1
+    [ -z "$out" ]
+}
+
+cluster_dir_free() { [ ! -e "$1/metadata.json" ]; }
+
+dir_is_empty() {
+    [ ! -d "$1" ] || [ -z "$(ls -A "$1" 2>/dev/null)" ]
+}
+
+# openshift-install caps metadata.name at 54 characters: 63 for a DNS
+# label, less the nine that *.apps costs once it is written out as
+# \052.apps. Timestamp names are nowhere near it.
+name_length_ok() { [ ${#1} -le 54 ]; }
+
+# Azure and GCP both take the RFC 1035 reading, which is RFC 1123 plus a
+# first character that must be a letter. A CLUSTER_USER starting with a
+# digit passes every other check here and is rejected by the installer.
+name_is_rfc1035() { printf '%s' "$1" | grep -qE '^[a-z]([-a-z0-9]*[a-z0-9])?$'; }
+
+# The flag clears on the next top-level key, or a metadata block with
+# no name: line would let the scan run on into compute:/controlPlane:
+# and hand back a machine-pool name as the cluster's.
+config_name() {
+    awk '/^[^ ]/{f=0} /^metadata:/{f=1} f&&/^  name:/{print $2; exit}' "$1"
+}
+
+config_has_name() { [ -n "$(config_name "$1")" ]; }
+
+config_name_is_valid() {
+    local n
+    n="$(config_name "$1")"
+    [ -n "$n" ] && name_is_rfc1035 "$n"
+}
+
+# ---------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------
+
+ensure_installer() {
+    if [ -x "$installer" ] && "$installer" version >/dev/null 2>&1; then
+        info "  openshift-install already in $bin_dir"
+        return 0
+    fi
+    BIN_DIR="$bin_dir" "$here/get-openshift-install"
+}
+
+config_matches_request() {
+    local f="$1" want="$2" got
+    got="$(config_name "$f")"
+    [ "$got" = "$want" ]
+}
+
+# The name is always ours, even when the config is yours; identity stays
+# the generated timestamp name because the facts file and teardown's
+# prefix matching key on it. Only the copy is renamed.
+rename_config() {
+    local f="$1" original
+    original="$(config_name "$f")"
+    [ "$original" = "$cluster_name" ] && return 0
+    # umask, because the rewrite goes through a scratch file and the
+    # pull secret is inside.
+    ( umask 077; awk -v name="$cluster_name" '
+        /^[^ ]/ { in_md = 0 }
+        /^metadata:/ { in_md = 1 }
+        in_md && /^  name:/ { print "  name: " name; in_md = 0; next }
+        { print }
+    ' "$f" > "$f.renamed" )
+    mv "$f.renamed" "$f"
+    config_matches_request "$f" "$cluster_name" \
+        || die "could not rewrite metadata.name in $f" \
+            "It still names $(config_name "$f"), not $cluster_name."
+    info "  renamed metadata.name: $original -> $cluster_name"
+}
+
+prepare_config() {
+    mkdir -p "$cluster_dir"
+    local existing=""
+    [ -f "$cluster_dir/install-config.yaml.bak" ] && existing="$cluster_dir/install-config.yaml.bak"
+    [ -f "$cluster_dir/install-config.yaml" ] && existing="$cluster_dir/install-config.yaml"
+
+    if [ -n "$existing" ]; then
+        if config_matches_request "$existing" "$cluster_name"; then
+            info "  install-config already present for $cluster_name"
+            return 0
+        fi
+        die "$existing is for a different cluster" \
+            "It names $(config_name "$existing"), not $cluster_name." \
+            "Resuming would install from artefacts that do not match what you asked for." \
+            "Either pick a different short name, or remove $cluster_dir and start again."
+    fi
+    if [ -n "${INSTALL_CONFIG:-}" ]; then
+        install -m 600 "$INSTALL_CONFIG" "$cluster_dir/install-config.yaml"
+        rename_config "$cluster_dir/install-config.yaml"
+    else
+        CLUSTER_NAME="$cluster_name" PULL_SECRET="$pull_secret" \
+            "$here/azure-create-install-config" "$cluster_dir/install-config.yaml"
+    fi
+    # create cluster consumes the original; the copy is the record of
+    # what was asked for, which the directory exists to keep.
+    cp "$cluster_dir/install-config.yaml" "$cluster_dir/install-config.yaml.bak"
+}
+
+# Everything teardown needs, in a file that nothing else deletes.
+# metadata.json is the installer's and destroy removes it on success;
+# this survives on purpose. The subscription is in here because the
+# credentials file it came from is not part of the cluster directory and
+# may name something else entirely by the time you tear down.
+facts_file() { printf '%s' "$cluster_dir/cluster-facts"; }
+
+write_cluster_facts() {
+    mkdir -p "$cluster_dir"
+    cat > "$(facts_file)" <<EOF
+# Written by azure-create-cluster. Read by azure-destroy-cluster.
+# Survives teardown on purpose: metadata.json does not.
+cloud=azure
+cluster_name=$cluster_name
+subscription=$subscription
+region=$region
+base_domain=$base_domain
+base_domain_rg=$base_domain_rg
+ocp_version=${ocp_version:-unknown}
+cluster_dir=$cluster_dir
+EOF
+    info "  wrote $(facts_file)"
+}
+
+# Idempotent, because create_cluster calls this the moment the installer
+# returns and the phase below calls it again.
+record_infra_id() {
+    if grep -q '^infra_id=' "$(facts_file)" 2>/dev/null; then
+        info "  infra id already recorded"
+        return 0
+    fi
+    local md="$cluster_dir/metadata.json"
+    if [ ! -f "$md" ]; then
+        warn "  no metadata.json, cannot record the infra id"
+        return 1
+    fi
+    local infra
+    # // empty, or a metadata.json without the key would persist the
+    # literal infra_id=null into the facts file teardown trusts.
+    infra="$(jq -r '.infraID // empty' "$md")"
+    if [ -z "$infra" ]; then
+        warn "  metadata.json carries no infraID"
+        return 1
+    fi
+    printf 'infra_id=%s\n' "$infra" >> "$(facts_file)"
+    info "  recorded infra_id=$infra"
+}
+
+# Same file the AWS and GCP scripts write: cd in and oc points here.
+write_cluster_envrc() {
+    cat > "$cluster_dir/.envrc" <<'EOF'
+# Written by azure-create-cluster. Keeps the repo's flake shell, then
+# points oc and openshift-install at this cluster.
+source_up_if_exists
+export KUBECONFIG="$PWD/auth/kubeconfig"
+EOF
+    if command -v direnv >/dev/null 2>&1; then
+        if direnv allow "$cluster_dir" 2>/dev/null; then
+            info "  wrote and allowed $cluster_dir/.envrc"
+        else
+            info "  wrote $cluster_dir/.envrc (direnv allow failed, run it yourself)"
+        fi
+    else
+        info "  wrote $cluster_dir/.envrc (no direnv; source it or export KUBECONFIG)"
+    fi
+}
+
+create_cluster() {
+    # The installer would otherwise pick up agent keys that conflict
+    # with the cluster's own.
+    unset SSH_AUTH_SOCK
+    local status=0
+    AZURE_AUTH_LOCATION="$creds_file" \
+        "$installer" create cluster --dir="$cluster_dir" --log-level=info || status=$?
+    # Record the infra id here rather than only in the phase below,
+    # which a failed install never reaches. metadata.json is written as
+    # soon as the installer starts creating infrastructure, so an
+    # install that dies midway still leaves one -- and that is precisely
+    # when teardown needs the id, because the first destroy deletes
+    # metadata.json and any retry would otherwise read a facts file with
+    # no infra id and conclude nothing was ever created.
+    record_infra_id || true
+    return "$status"
+}
+
+# Conditions, never columns; see aws-create-cluster for the incident
+# that rule comes from.
+operators_total() {
+    KUBECONFIG="$cluster_dir/auth/kubeconfig" oc get co -o json 2>/dev/null \
+        | jq -r '.items | length'
+}
+
+operators_unavailable() {
+    KUBECONFIG="$cluster_dir/auth/kubeconfig" oc get co -o json 2>/dev/null \
+        | jq -r '[.items[] | select(([(.status.conditions // [])[]
+            | select(.type=="Available") | .status] | first) != "True")
+            | .metadata.name] | join(" ")'
+}
+
+all_operators_available() {
+    local bad total
+    bad="$(operators_unavailable)"
+    total="$(operators_total)"
+    [ -n "$total" ] || return 1
+    if [ -z "$bad" ]; then
+        info "  $total/$total operators Available"
+        return 0
+    fi
+    info "  waiting on: $bad"
+    return 1
+}
+
+verify_cluster() {
+    wait_until 900 30 "every cluster operator to become Available" \
+        all_operators_available \
+        || fail "some operators never became Available, see above"
+    return 0
+}
+
+# ---------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------
+
+info "Cluster:   $cluster_name"
+info "Directory: $cluster_dir"
+info "Tools:     $bin_dir (this cluster owns them)"
+info "Creds:     $creds_file"
+info ""
+
+info "--- preflight ---"
+check "az on PATH"                     command -v az
+check "oc on PATH"                     command -v oc
+check "jq on PATH"                     command -v jq
+check "python3 on PATH"                command -v python3
+# Guarded rather than listed flat, because each of these reads the
+# previous one's subject: an absent file otherwise fails four checks for
+# one cause, and the fourth compares az against the empty string as
+# though the subscription were merely wrong.
+check "service principal file present" test -f "$creds_file"
+if [ -f "$creds_file" ]; then
+    check "service principal file parses"       jq -e . "$creds_file"
+    check "credentials are a service principal" creds_are_a_service_principal
+    if [ -n "$(creds_field subscriptionId)" ]; then
+        check "az is on the same subscription"  subscription_agrees
+    fi
+fi
+check "pull secret readable"           jq -e . "$pull_secret"
+check "cluster directory unused"       cluster_dir_free "$cluster_dir"
+check "cluster directory is empty"     dir_is_empty "$cluster_dir"
+check "name within 54 chars"           name_length_ok "$cluster_name"
+check "name is RFC 1035 valid"         name_is_rfc1035 "$cluster_name"
+abort_if_failed
+
+scratch=""
+cleanup_guidance=false
+on_exit() {
+    local status=$?
+    [ -n "$scratch" ] && rm -rf "$scratch"
+    if [ "$status" -ne 0 ] && [ "$cleanup_guidance" = true ]; then
+        warn ""
+        warn "Failed partway through. To clean up whatever exists:"
+        warn "  CLUSTER=$cluster_dir azure-destroy-cluster"
+    fi
+}
+trap on_exit EXIT
+
+# Validate the config that will actually be installed; see
+# aws-create-cluster for why a generated stand-in goes to a scratch
+# directory rather than the cluster directory.
+if [ -n "${INSTALL_CONFIG:-}" ]; then
+    config="$INSTALL_CONFIG"
+    [ -f "$config" ] || die "INSTALL_CONFIG points at $config, which does not exist"
+else
+    scratch="$(mktemp -d)"
+    CLUSTER_NAME="$cluster_name" PULL_SECRET="$pull_secret" \
+        "$here/azure-create-install-config" "$scratch/install-config.yaml" >/dev/null
+    config="$scratch/install-config.yaml"
+fi
+
+subscription="$(creds_field subscriptionId)"
+region="$(config_azure_field "$config" region)"
+base_domain="$(config_base_domain "$config")"
+base_domain_rg="$(config_azure_field "$config" baseDomainResourceGroupName)"
+replicas="$(config_control_plane_replicas "$config")"
+
+check "install-config parses as YAML"     config_is_yaml "$config"
+if [ -n "${INSTALL_CONFIG:-}" ]; then
+    check "config has a metadata.name to rewrite" config_has_name "$config"
+else
+    check "metadata.name is RFC 1035 valid"   config_name_is_valid "$config"
+fi
+check "credentialsMode is not Manual"     config_not_manual "$config"
+check "install-config has a pull secret"  config_has_pull_secret "$config"
+check "install-config has an ssh key"     config_has_ssh_key "$config"
+check "region is set"                     test -n "$region"
+check "baseDomainResourceGroupName is set" test -n "$base_domain_rg"
+check "DNS zone for $base_domain"         dns_zone_exists "$base_domain"
+check "no resource groups named ${cluster_name}-*" \
+    resource_groups_free "$cluster_name"
+
+# The record check needs a group that exists, and the two checks above
+# have already said whether it does. Running it anyway would fail a
+# second time for the same reason, which reads as two problems.
+if [ -n "$base_domain_rg" ] && dns_zone_exists "$base_domain" 2>/dev/null; then
+    check "no DNS records for api.$cluster_name.$base_domain" \
+        records_free "$base_domain_rg" "$base_domain" "$cluster_name"
+fi
+check_warn "three control-plane nodes"    test "$replicas" = "3"
+abort_if_failed
+
+if [ "$replicas" != "3" ]; then
+    warn "  control plane has $replicas node(s). Every kube-apiserver"
+    warn "  rollout will take the API down until it completes."
+fi
+info ""
+
+if [ "$dry_run" = true ]; then
+    info "Would create $cluster_name in ${region:-<from config>} (subscription $subscription)."
+    report
+    exit $?
+fi
+
+# No confirmation prompt; the preflight is the guard. --dry-run is how
+# you rehearse.
+
+cleanup_guidance=true
+
+step "openshift-install"     ensure_installer
+step "install config"        prepare_config
+# Early, so cd-ing into the directory works while the install is still
+# running rather than only once it finishes.
+step "cluster .envrc"        write_cluster_envrc
+step "cluster facts"         write_cluster_facts
+step "create cluster"        create_cluster
+# phase, not step: a cluster with a sulking operator is still a cluster
+# you want to keep and look at.
+phase "record infra id"      record_infra_id
+phase "verify operators"     verify_cluster
+
+cleanup_guidance=false
+
+info ""
+export KUBECONFIG="$cluster_dir/auth/kubeconfig"
+
+info "Cluster:    $cluster_name"
+info "Kubeconfig: $cluster_dir/auth/kubeconfig"
+info "            export KUBECONFIG=$cluster_dir/auth/kubeconfig"
+info "Password:   $cluster_dir/auth/kubeadmin-password"
+info ""
+info "Tear it down with:"
+info "  CLUSTER=$cluster_dir azure-destroy-cluster"
+report

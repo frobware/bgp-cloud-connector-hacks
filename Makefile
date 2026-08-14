@@ -1,4 +1,4 @@
-scripts := $(filter-out aws-credential-process,$(wildcard aws-*)) $(wildcard gcp-*) get-openshift-install lib.bash
+scripts := $(filter-out aws-credential-process,$(wildcard aws-*)) $(wildcard azure-*) $(wildcard gcp-*) get-openshift-install lib.bash
 
 .DEFAULT_GOAL := check
 

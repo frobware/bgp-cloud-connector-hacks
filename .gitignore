@@ -31,6 +31,7 @@
 # the entire arrangement. Adding a script costs a line here.
 !lib.bash
 !aws-lib.bash
+!azure-lib.bash
 !gcp-lib.bash
 !aws-create-cluster
 !aws-create-install-config
@@ -40,6 +41,10 @@
 !aws-install-saml
 !aws-list-route-servers
 !aws-login
+!azure-create-cluster
+!azure-create-install-config
+!azure-destroy-cluster
+!azure-installer-credentials
 !gcp-create-cloud-router
 !gcp-delete-cloud-router
 !gcp-list-cloud-router

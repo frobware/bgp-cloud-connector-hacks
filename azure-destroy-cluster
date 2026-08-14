@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+#
+# Tear down a cluster built by azure-create-cluster.
+#
+#   CLUSTER=$PWD/clusters/azure-2608131500-4228 azure-destroy-cluster --dry-run
+#   CLUSTER=$PWD/clusters/azure-2608131500-4228 azure-destroy-cluster
+#
+# Shorter than its AWS sibling for the same reason the GCP one is. On
+# AWS, ccoctl creates IAM roles, an OIDC provider and an S3 bucket
+# before the installer ever runs, all keyed on the cluster name, and
+# openshift-install destroy never learns about them. Azure has no Mint
+# mode and nothing is created ahead of the install: the cluster is one
+# resource group named after the infra id, plus two record sets in the
+# base domain's zone, and destroy knows about all of it. What remains
+# here is the "remaining" check afterwards, because trusting that claim
+# without looking is how orphans happen.
+#
+# An install that died before "create cluster" created nothing in Azure,
+# so a directory with no metadata.json and no infra id means there is
+# genuinely nothing to delete.
+#
+# Once the cluster directory is gone, name things instead:
+#
+#   CLUSTER_NAME=aim-2608131500 INFRA=aim-2608131500-abcde \
+#   AZURE_BASE_DOMAIN=<domain> azure-destroy-cluster
+#
+# Named that way it audits and does not delete. openshift-install
+# destroy drives off the directory's metadata.json, so with no directory
+# there is nothing to drive a deletion with: the run tells you what
+# survives and where, and you remove it from that list by hand -- on
+# Azure that is usually one az group delete.
+#
+# Every phase runs even if an earlier one failed; failures are collected
+# and reported at the end, and the exit status reflects them. This
+# deletes cloud resources and nothing else: the directory stays, bin/
+# included, because yesterday's cluster is still worth reading. Remove
+# it yourself when you are finished.
+#
+# Overrides: AZURE_AUTH_LOCATION (default ~/.azure/osServicePrincipal.json),
+# OPENSHIFT_INSTALL (default: the cluster's own bin/, then PATH).
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/azure-lib.bash"
+
+parse_args_only_common "$@"
+require_cmd az jq
+
+creds_file="$(azure_credentials_file)"
+
+cluster_name="${CLUSTER_NAME:-}"
+infra="${INFRA:-}"
+base_domain="${AZURE_BASE_DOMAIN:-}"
+base_domain_rg="${AZURE_BASE_DOMAIN_RG:-}"
+subscription=""
+
+# cluster-facts first, metadata.json second: the facts file survives a
+# destroy that dies partway, the installer's file does not. Parsed, not
+# sourced, so the documented overrides above keep working.
+read_fact() {
+    awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1"
+}
+
+facts="${CLUSTER:-}/cluster-facts"
+if [ -f "$facts" ]; then
+    [ -n "$cluster_name" ] || cluster_name="$(read_fact "$facts" cluster_name)"
+    [ -n "$infra" ] || infra="$(read_fact "$facts" infra_id)"
+    [ -n "$base_domain" ] || base_domain="$(read_fact "$facts" base_domain)"
+    [ -n "$base_domain_rg" ] || base_domain_rg="$(read_fact "$facts" base_domain_rg)"
+    subscription="$(read_fact "$facts" subscription)"
+    [ -n "$cluster_name" ] && echo "Read identifiers from $facts"
+fi
+
+if [ -z "$cluster_name" ] || [ -z "$infra" ] || [ -z "$subscription" ]; then
+    metadata="${CLUSTER:-}/metadata.json"
+    if [ -n "${CLUSTER:-}" ] && [ -f "$metadata" ]; then
+        # // empty, or jq hands back the literal string "null" for a
+        # missing key, which passes every -z/-n gate and ends with
+        # filters hunting resources named null-*.
+        [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName // empty' "$metadata")"
+        [ -n "$infra" ] || infra="$(jq -r '.infraID // empty' "$metadata")"
+        [ -n "$base_domain_rg" ] || base_domain_rg="$(jq -r '.azure.baseDomainResourceGroupName // empty' "$metadata")"
+    fi
+fi
+
+# Refuse the other clouds' directories. All three share the facts schema
+# and clusters/ holds them side by side, so nothing else stops a
+# tab-completion slip handing this script an AWS cluster: the shared
+# region key would feed the audit and the named installer would be asked
+# to destroy a cluster it can genuinely find. Evidence, in order: the
+# facts file's cloud key, then whichever platform key metadata.json
+# carries, then the facts keys only one cloud writes -- ccoctl_name is
+# AWS's, project is GCP's, subscription is ours -- which covers facts
+# files from before the cloud key existed. No evidence at all means
+# proceed.
+cloud=""
+if [ -f "$facts" ]; then
+    cloud="$(read_fact "$facts" cloud)"
+fi
+if [ -z "$cloud" ] && [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
+    if jq -e '.azure' "${CLUSTER}/metadata.json" >/dev/null 2>&1; then
+        cloud=azure
+    elif jq -e '.gcp' "${CLUSTER}/metadata.json" >/dev/null 2>&1; then
+        cloud=gcp
+    elif jq -e '.aws' "${CLUSTER}/metadata.json" >/dev/null 2>&1; then
+        cloud=aws
+    fi
+fi
+if [ -z "$cloud" ] && [ -f "$facts" ]; then
+    if [ -n "$(read_fact "$facts" ccoctl_name)" ]; then
+        cloud=aws
+    elif [ -n "$(read_fact "$facts" project)" ]; then
+        cloud=gcp
+    elif [ -n "$(read_fact "$facts" subscription)" ]; then
+        cloud=azure
+    fi
+fi
+if [ -n "$cloud" ] && [ "$cloud" != "azure" ]; then
+    die "this cluster directory belongs to $cloud" \
+        "Use ${cloud}-destroy-cluster instead."
+fi
+
+if [ -z "$cluster_name" ]; then
+    die "no cluster name in cluster-facts, metadata.json or CLUSTER_NAME" \
+        "Set CLUSTER to the cluster directory, or name them directly:" \
+        "  CLUSTER_NAME=<name> INFRA=<infra-id> ${0##*/}"
+fi
+
+require_azure
+
+# The recorded subscription wins over whatever az happens to be pointed
+# at, for the reason AWS_REGION taught us: an ambient value that is
+# right most days silently sends the audit somewhere the cluster never
+# was, and "nothing found" reads exactly like "nothing left". Where
+# nothing was recorded the login is the only source we have.
+if [ -z "$subscription" ]; then
+    subscription="$(azure_active_subscription)"
+    [ -n "$subscription" ] || die "no subscription recorded and az has none selected" \
+        "Run az login, or name it in cluster-facts."
+elif [ "$subscription" != "$(azure_active_subscription)" ]; then
+    warn "az is on $(azure_active_subscription); the cluster was built in $subscription, using that"
+fi
+
+# The installer takes its subscription from the credentials file and
+# nothing overrides it, so a file naming somewhere else would destroy
+# from a different subscription than the one audited below -- or, more
+# likely, find nothing and report success.
+creds_subscription="$(jq -r '.subscriptionId // empty' "$creds_file" 2>/dev/null || true)"
+if [ -n "$creds_subscription" ] && [ "$creds_subscription" != "$subscription" ]; then
+    die "$creds_file names subscription $creds_subscription" \
+        "The cluster is in $subscription." \
+        "openshift-install would look in the wrong place and report success."
+fi
+
+# What the installer built under, so destroy can find its resources.
+if [ -n "${OPENSHIFT_INSTALL:-}" ]; then
+    installer="$OPENSHIFT_INSTALL"
+elif [ -x "${CLUSTER:-}/bin/openshift-install" ]; then
+    installer="$CLUSTER/bin/openshift-install"
+else
+    installer="openshift-install"
+fi
+
+echo "Subscription: $subscription"
+echo "Cluster name: $cluster_name"
+echo "Infra id:     ${infra:-<none: the install never created the cluster>}"
+echo "Installer:    $installer"
+echo
+
+# Keyed on the same predicate as the deletion phase below, or the banner
+# promises a destroy that named mode never runs.
+echo "Will delete:"
+if [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
+    echo "  the cluster ${infra:-$cluster_name}, via openshift-install destroy"
+    echo "  (its resource group and the base domain's record sets go with it)"
+elif [ -n "$infra" ]; then
+    echo "  nothing: without metadata.json there is nothing for the"
+    echo "  installer to destroy from, so this run only audits what"
+    echo "  survives for $infra"
+else
+    echo "  nothing: Azure creates nothing before the cluster itself"
+fi
+echo
+
+# Phase 1. The cluster. Everything an Azure cluster owns lives in
+# <infra>-rg, and destroy removes the group and the DNS records it
+# added.
+echo "--- cluster ---"
+if [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
+    if [ ! -f "$creds_file" ]; then
+        fail "no service principal at $creds_file, cannot run destroy"
+    elif ! AZURE_AUTH_LOCATION="$creds_file" \
+            try "$installer" destroy cluster --dir="$CLUSTER" --log-level=info; then
+        fail "openshift-install destroy cluster"
+    fi
+else
+    echo "  no metadata.json, assuming the cluster is already gone"
+fi
+echo
+
+# Phase 2. Say what is actually left rather than trusting the above.
+# After a clean destroy every listing here comes back empty. Matching is
+# on the infra id, which itself starts "<name>-", so nothing here can
+# catch another cluster's resources: the timestamp in the name sees to
+# that.
+#
+# A listing that fails is recorded, not fatal: "nothing" is not a claim
+# we can make about resources we could not list.
+echo "--- remaining ---"
+if [ "$dry_run" = true ]; then
+    echo "  (skipped: nothing was deleted)"
+elif [ -z "$infra" ]; then
+    echo "  no infra id, nothing was ever created"
+else
+    remaining=""
+    list_remaining() {
+        local kind="$1"; shift
+        local out
+        if ! out="$("$@" 2>/dev/null)"; then
+            fail "could not list $kind"
+            return 0
+        fi
+        local line
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf '  %-16s %s\n' "$kind" "$line"
+            remaining=yes
+        done <<< "$out"
+    }
+
+    list_remaining "resource group" az group list --subscription "$subscription" \
+        --query "[?starts_with(name, '${infra}')].name" -o tsv
+
+    # Filtered in --query rather than grepped afterwards, for the reason
+    # azure-create-cluster spells out: the unfiltered listing is 140KB
+    # of names, which is more than a single environment string may hold,
+    # and the next exec after reading it into a variable fails with
+    # "Argument list too long". Nothing is piped either, so az's own
+    # status reaches list_remaining -- a listing we could not run must
+    # not read as a clean empty one.
+    dns_records_matching() {
+        az network dns record-set list --subscription "$subscription" \
+            -g "$1" -z "$2" \
+            --query "[?name=='api.${cluster_name}' || name=='*.apps.${cluster_name}'].name" \
+            -o tsv
+    }
+
+    # Needs the zone and the group holding it; without them, say so
+    # rather than skipping in silence. zone_resource_group refuses
+    # ambiguity, and the guarded assignment keeps a lookup failure from
+    # killing the script under errexit before the report prints.
+    if [ -n "$base_domain" ] && [ -z "$base_domain_rg" ]; then
+        base_domain_rg="$(zone_resource_group "$base_domain" 2>/dev/null || true)"
+    fi
+    if [ -n "$base_domain" ] && [ -n "$base_domain_rg" ]; then
+        list_remaining "dns record" dns_records_matching "$base_domain_rg" "$base_domain"
+    else
+        echo "  (no base domain and group known, DNS records not checked)"
+    fi
+
+    if [ -z "$remaining" ] && [ "$(failure_count)" -eq 0 ]; then
+        echo "  nothing"
+    elif [ -n "$remaining" ]; then
+        fail "resources remain, see above"
+    fi
+fi
+echo
+
+if [ -n "${CLUSTER:-}" ]; then
+    info "Cloud resources only. This directory is untouched, bin/ included:"
+    info "  $CLUSTER"
+    info "Remove it by hand once you no longer want the logs."
+fi
+
+report

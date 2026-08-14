@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+#
+# Write an install-config.yaml for an Azure cluster.
+#
+#   azure-create-install-config ~/.secrets/install-config.yaml
+#   CONTROL_PLANE_REPLICAS=1 azure-create-install-config /tmp/cheap.yaml
+#
+# Three control-plane nodes by default, for the same reasons as the AWS
+# and GCP scripts: one master turns every kube-apiserver rollout into an
+# API outage, and during bootstrap teardown a two-member etcd is a
+# quorum deadlock waiting for either member to blink.
+#
+# No credentialsMode line, and on Azure that is not a choice so much as
+# the absence of one. The installer accepts Mint, Passthrough and Manual
+# only where the platform supports them, and Azure supports Passthrough
+# and Manual -- there is no Mint. Left empty, the installer checks what
+# the service principal can do and settles on Passthrough, which copies
+# the same credential into each component rather than minting narrower
+# ones. Manual is the workload-identity path with its own ccoctl dance,
+# and this script does not do it.
+#
+# AZURE_BASE_DOMAIN is a constant here where the GCP script discovers
+# it, and the difference is that a shared subscription accumulates
+# delegated zones by the dozen, so discovery would have nothing to pick
+# between them. The default is the zone QE clusters hang off, which is
+# the same bargain aws-create-install-config makes. The resource group
+# holding it is discovered rather than baked in, because that is a
+# lookup with exactly one answer.
+#
+# Environment:
+#
+#   AZURE_BASE_DOMAIN       default qe.azure.devcluster.openshift.com
+#   AZURE_BASE_DOMAIN_RG    default: the group holding that zone
+#   AZURE_REGION            default centralus
+#   CONTROL_PLANE_REPLICAS  default 3
+#   WORKER_REPLICAS         default 3
+#   CONTROL_PLANE_TYPE      default Standard_D8s_v3
+#   WORKER_TYPE             default Standard_D4s_v3
+#   CLUSTER_NAME            default <user>-<YYMMDDHHMM>
+#   SSH_KEY                 path to a public key, default ~/.ssh/id_ed25519.pub
+#   PULL_SECRET             path to pull-secret json, default ~/.secrets/pull-secret.json
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/azure-lib.bash"
+
+parse_common_args "$@"
+if [ ${#rest[@]} -ne 1 ]; then
+    die "need exactly one output path" \
+        "Usage: ${0##*/} [--dry-run] <output-file>" \
+        "Overwrites the output file without asking."
+fi
+out="${rest[0]}"
+
+require_cmd jq
+
+base_domain="${AZURE_BASE_DOMAIN:-qe.azure.devcluster.openshift.com}"
+region="${AZURE_REGION:-centralus}"
+control_plane_replicas="${CONTROL_PLANE_REPLICAS:-3}"
+worker_replicas="${WORKER_REPLICAS:-3}"
+# The sizes openshift-install would pick for Azure by itself. The
+# control plane gets the larger one because Azure scales managed-disk
+# IOPS with the VM, and etcd notices.
+control_plane_type="${CONTROL_PLANE_TYPE:-Standard_D8s_v3}"
+worker_type="${WORKER_TYPE:-Standard_D4s_v3}"
+ssh_key="${SSH_KEY:-$HOME/.ssh/id_ed25519.pub}"
+cluster_name="${CLUSTER_NAME:-${CLUSTER_USER:-${USER:-$(whoami)}}-$(date +%y%m%d%H%M)}"
+pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
+
+base_domain_rg="${AZURE_BASE_DOMAIN_RG:-}"
+if [ -z "$base_domain_rg" ]; then
+    # Discovery needs a working az login; a supplied
+    # AZURE_BASE_DOMAIN_RG does not, which also keeps --dry-run possible
+    # offline.
+    require_azure
+    base_domain_rg="$(zone_resource_group "$base_domain" 2>/dev/null || true)"
+    [ -n "$base_domain_rg" ] || die "no public DNS zone named $base_domain" \
+        "The installer needs one to create api.<cluster>.<domain>." \
+        "Either the zone is in another subscription, or two groups hold" \
+        "a zone of that name and there is nothing to choose between them." \
+        "Set AZURE_BASE_DOMAIN_RG to say which."
+fi
+
+[ -f "$ssh_key" ] || die "no ssh public key at $ssh_key" \
+    "Set SSH_KEY to the one you want baked into the nodes."
+
+[ -f "$pull_secret" ] || die "no pull secret at $pull_secret" \
+    "Get one from console.redhat.com, or set PULL_SECRET." \
+    "If you also want CI payloads, merge in registry.ci.openshift.org:" \
+    "oc registry login --to \$PULL_SECRET"
+
+jq -e . "$pull_secret" >/dev/null 2>&1 \
+    || die "$pull_secret is not valid JSON"
+
+# Overwrites without asking, same as the AWS and GCP scripts:
+# azure-create-cluster always points this at a directory the preflight
+# has already proved empty.
+
+if [ "$control_plane_replicas" != "3" ]; then
+    warn "control plane replicas is $control_plane_replicas, not 3."
+    warn "Every kube-apiserver rollout will interrupt the API."
+fi
+
+if [ "$dry_run" = true ]; then
+    info "  would write $out"
+    info "    baseDomain    $base_domain"
+    info "    domain group  $base_domain_rg"
+    info "    region        $region"
+    info "    control plane $control_plane_replicas x $control_plane_type"
+    info "    workers       $worker_replicas x $worker_type"
+    info "    sshKey        $ssh_key"
+    info "    pullSecret    $pull_secret"
+    info "    clusterName   $cluster_name"
+    report
+    exit $?
+fi
+
+# Written with a restrictive umask because the pull secret goes inside.
+old_umask="$(umask)"
+umask 077
+cat > "$out" <<EOF
+additionalTrustBundlePolicy: Proxyonly
+apiVersion: v1
+baseDomain: $base_domain
+compute:
+- architecture: amd64
+  hyperthreading: Enabled
+  name: worker
+  platform:
+    azure:
+      type: $worker_type
+  replicas: $worker_replicas
+controlPlane:
+  architecture: amd64
+  hyperthreading: Enabled
+  name: master
+  platform:
+    azure:
+      type: $control_plane_type
+  replicas: $control_plane_replicas
+metadata:
+  creationTimestamp: null
+  name: $cluster_name
+networking:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  machineNetwork:
+  - cidr: 10.0.0.0/16
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - 172.30.0.0/16
+platform:
+  azure:
+    baseDomainResourceGroupName: $base_domain_rg
+    cloudName: AzurePublicCloud
+    outboundType: Loadbalancer
+    region: $region
+publish: External
+sshKey: |
+  $(cat "$ssh_key")
+pullSecret: '$(jq -c . "$pull_secret")'
+EOF
+umask "$old_umask"
+
+info "Wrote $out"
+info "  cluster name  $cluster_name"
+info "  control plane $control_plane_replicas x $control_plane_type"
+info "  workers       $worker_replicas x $worker_type"
+info "  region        $region"
+info "  baseDomain    $base_domain"
+info "  domain group  $base_domain_rg"
+report

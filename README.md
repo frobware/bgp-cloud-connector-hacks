@@ -4,9 +4,9 @@ Scaffolding for developing bgp-cloud-connector against a real cloud,
 until the rosa-bgp Terraform is available and most of this can be
 deleted.
 
-Everything here is prefixed by cloud: `aws-` and `gcp-` today,
-`azure-` when it lands. `lib.bash` is shared and deliberately knows
-nothing about any particular cloud; `aws-lib.bash` and `gcp-lib.bash`
+Everything here is prefixed by cloud: `aws-`, `azure-` and `gcp-`.
+`lib.bash` is shared and deliberately knows nothing about any
+particular cloud; `aws-lib.bash`, `azure-lib.bash` and `gcp-lib.bash`
 layer the cloud-specific helpers on top, and scripts source the lib
 for their cloud.
 
@@ -62,7 +62,7 @@ out from the error.
 | | |
 |:---|:---|
 | `lib.bash` | Shared helpers. Source it, do not run it. |
-| `aws-lib.bash`, `gcp-lib.bash` | Cloud-specific helpers layered over `lib.bash` |
+| `aws-lib.bash`, `azure-lib.bash`, `gcp-lib.bash` | Cloud-specific helpers layered over `lib.bash` |
 | `aws-install-saml` | Builds `~/.venvs/aws-saml` and installs Red Hat's `aws-saml.py`. Rerun it after a Python bump, since the venv points into the Nix store without a GC root. |
 | `aws-login` | Mints credentials into the `saml` profile, skipping if the current ones still work |
 | `get-openshift-install` | Fetches `openshift-install` from the mirror. No `aws-` prefix: it is the same binary whichever cloud you point it at. |
@@ -73,6 +73,10 @@ out from the error.
 | `aws-delete-route-servers` | Tears them down again |
 | `aws-destroy-cluster` | Full teardown, including what `openshift-install destroy` leaves behind |
 | `cmd/aws-credential-process` | Credentials that refresh themselves. See below. |
+| `azure-installer-credentials` | One-time: the service principal `openshift-install` needs, if you are allowed to make one |
+| `azure-create-cluster` | Builds an Azure cluster. Same shape as the GCP one. |
+| `azure-create-install-config` | Writes an Azure install-config.yaml |
+| `azure-destroy-cluster` | Teardown, plus a check that destroy really took everything |
 | `gcp-installer-credentials` | One-time: the service account and key `openshift-install` needs |
 | `gcp-create-cluster` | Builds a GCP cluster. Same shape as the AWS one, minus the credential dance. |
 | `gcp-create-install-config` | Writes a GCP install-config.yaml |
@@ -473,6 +477,80 @@ Differences worth knowing, next to AWS:
   side arrives with the bgp-cloud-connector work;
   [rh-mobb/osd-gcp-cudn-routing](https://github.com/rh-mobb/osd-gcp-cudn-routing)
   is the prototype to mine.
+
+## Azure
+
+The same shape again, and for the same reason as GCP: no ccoctl. Azure
+has no mint mode at all -- `openshift-install explain
+installconfig.credentialsMode` lists Passthrough and Manual for Azure
+and nothing else -- so the config carries no `credentialsMode` line,
+the cloud credential operator copies the one service principal into
+each component, and nothing is created before the installer runs.
+
+What Azure adds instead is that the credential may not be yours to
+make. `openshift-install` reads a service principal from
+`~/.azure/osServicePrincipal.json` (`AZURE_AUTH_LOCATION` moves it),
+and there is no path that authenticates as your `az login`. Two roles
+on the subscription are needed and neither is optional: Contributor to
+build the cluster, and User Access Administrator because the installer
+creates a user-assigned managed identity and assigns it a role, which
+Contributor explicitly cannot -- `Microsoft.Authorization/*/Write` is
+in its `notActions`.
+
+Registering an application and granting it those roles are separate
+permissions, and a tenant may well give you the first without the
+second. An application with no roles is an orphan rather than a
+credential, so `azure-installer-credentials` tests for the second
+before it creates anything, and refuses with the two `az role
+assignment create` lines to take to whoever owns the subscription.
+Given the client id and secret of a principal that already holds them,
+write the four fields into the file yourself and skip that script
+entirely.
+
+With the file in place it is the same rhythm as the other two:
+
+```
+az login                           # your own login, for the preflight queries
+
+PULL_SECRET=$HOME/.secrets/pull-secret.json \
+SSH_KEY=$HOME/.ssh/id_ed25519.pub \
+  azure-create-cluster --dry-run
+
+PULL_SECRET=$HOME/.secrets/pull-secret.json \
+SSH_KEY=$HOME/.ssh/id_ed25519.pub \
+  azure-create-cluster
+
+CLUSTER=clusters/azure-<dir> azure-destroy-cluster
+```
+
+Differences worth knowing, next to GCP:
+
+- Your `az login` and the credentials file can name different
+  subscriptions, and nothing warns you: the installer uses the file
+  and every preflight query uses the login, so a preflight can vouch
+  for a subscription the cluster was never going to be built in. They
+  are compared, and a disagreement stops the run before anything
+  exists.
+- `AZURE_BASE_DOMAIN` is a constant where GCP discovers its zone. A
+  shared subscription accumulates delegated zones by the dozen and
+  discovery would have nothing to choose between them. The resource
+  group holding it is discovered, because that lookup has one answer.
+- A cluster is one resource group, `<infra-id>-rg`, plus two record
+  sets in the base domain's zone. Destroy takes all of it, so there is
+  no residue phase -- only the audit afterwards, which is what
+  actually looks.
+- Cluster names must begin with a lower-case letter here and on GCP,
+  not merely be RFC 1123. A `CLUSTER_USER` starting with a digit
+  passes every other check and is rejected by the installer.
+- Do not read a full record-set listing into a shell variable. A zone
+  shared by a fleet holds thousands of them, and a few thousand names
+  is comfortably past the 128KB a single environment string may hold:
+  every `exec` after that assignment dies with `Argument list too
+  long`, starting with the `grep` meant to read it. Filter in
+  `--query` instead, where `az` does the matching in Python and hands
+  back two lines.
+- No route servers yet. The Azure analogue is Azure Route Server, and
+  that side arrives with the bgp-cloud-connector work, as on GCP.
 
 ## Why bash, mostly
 
