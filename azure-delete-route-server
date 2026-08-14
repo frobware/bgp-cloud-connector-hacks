@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+#
+# Tear down what azure-create-route-server built: the BGP peerings, the
+# Route Server, the public IP it required, the RouteServerSubnet, and
+# the address prefix that had to be added to the vnet to make room for
+# it.
+#
+#   azure-delete-route-server --dry-run
+#   azure-delete-route-server
+#   azure-delete-route-server --delete-peerings
+#
+# Normally it identifies what to delete from the running cluster. Once
+# the cluster is gone there is nothing to ask, so name it:
+#
+#   INFRA=mycluster-abcde AZURE_RESOURCE_GROUP=mycluster-abcde-rg \
+#       azure-delete-route-server
+#
+# The point of removing the address prefix as well as the subnet is that
+# the cluster goes back to exactly what openshift-install built. The BGP
+# side is a bolt-on here, as it is on AWS and GCP, and a teardown that
+# left the vnet a /26 wider than the installer made it would not be one.
+#
+# Order is the reverse of creation and it matters. A subnet holding a
+# Route Server cannot be deleted, and an address prefix covering a
+# subnet cannot be removed, so each step is only possible once the one
+# before it has finished. Azure enforces this by refusing rather than by
+# corrupting, so the failure is loud.
+#
+# The public IP is deleted after the Route Server for the same reason:
+# it is in use until the Route Server has gone.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/azure-lib.bash"
+
+delete_peerings=false
+
+parse_common_args "$@"
+for arg in "${rest[@]+"${rest[@]}"}"; do
+    case "$arg" in
+        --delete-peerings) delete_peerings=true ;;
+        *) die "unknown option: $arg" "Usage: ${0##*/} [--dry-run] [--delete-peerings]" ;;
+    esac
+done
+require_cmd az
+require_azure
+
+# Each can come from the environment or from a running cluster. Read one
+# at a time rather than all-or-nothing, so a variable set in .envrc.local
+# still works alongside a live cluster supplying the rest.
+#
+# No region here, and none needed: everything this deletes is named by
+# its resource group. Which is just as well, because Azure's
+# infrastructure status does not carry a region the way AWS's and GCP's
+# do -- azure-create-route-server has to read it off the resource group.
+infra="${INFRA:-}"
+rg="${AZURE_RESOURCE_GROUP:-}"
+net_rg="${AZURE_NETWORK_RESOURCE_GROUP:-}"
+
+if [ -z "$infra" ] || [ -z "$rg" ]; then
+    if oc whoami >/dev/null 2>&1; then
+        : "${infra:=$(oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}' 2>/dev/null || true)}"
+        : "${rg:=$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.azure.resourceGroupName}' 2>/dev/null || true)}"
+        : "${net_rg:=$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.azure.networkResourceGroupName}' 2>/dev/null || true)}"
+    fi
+fi
+: "${net_rg:=$rg}"
+
+[ -n "$infra" ] && [ -n "$rg" ] || \
+    die "could not determine the cluster and its resource group" \
+        "No cluster is reachable, or it is not an Azure one. Name them:" \
+        "  INFRA=<infra-id> AZURE_RESOURCE_GROUP=<group> ${0##*/}" \
+        "Got: infra='${infra:-}' rg='${rg:-}'"
+
+subscription="$(azure_active_subscription)"
+[ -n "$subscription" ] || die "az has no subscription selected" \
+    "Pick one: az account set --subscription <id>"
+
+rs="$infra-rs"
+rs_pip="$infra-rs-pip"
+rs_subnet="RouteServerSubnet"
+
+# The vnet is found the way the create script finds it, by the tag the
+# installer puts on what it owns, falling back to the name.
+vnet_tag="sigs.k8s.io_cluster-api-provider-azure_cluster_$infra"
+vnet="$(az network vnet list -g "$net_rg" \
+    --query "[?tags.\"$vnet_tag\"=='owned'].name | [0]" -o tsv 2>/dev/null || true)"
+[ -n "$vnet" ] && [ "$vnet" != "None" ] || vnet="$infra-vnet"
+
+rs_exists()     { az network routeserver show -g "$rg" -n "$rs" --output none 2>/dev/null; }
+pip_exists()    { az network public-ip show -g "$rg" -n "$rs_pip" --output none 2>/dev/null; }
+vnet_exists()   { az network vnet show -g "$net_rg" -n "$vnet" --output none 2>/dev/null; }
+subnet_prefix() {
+    az network vnet subnet show -g "$net_rg" --vnet-name "$vnet" -n "$rs_subnet" \
+        --query addressPrefix -o tsv 2>/dev/null || true
+}
+
+info "Cluster:        $infra"
+info "Subscription:   $subscription"
+info "Resource group: $rg"
+[ "$net_rg" != "$rg" ] && info "Network group:  $net_rg"
+info ""
+
+# Say what is there before touching any of it, so a run against the
+# wrong cluster is obvious from the first few lines rather than from the
+# wreckage.
+found=0
+rs_cidr=""
+
+info "Will delete:"
+if rs_exists; then
+    peers="$(az network routeserver peering list -g "$rg" --routeserver "$rs" \
+        --query 'length(@)' -o tsv 2>/dev/null || echo 0)"
+    info "  Route Server $rs (with $peers BGP peering(s))"
+    found=$((found + 1))
+else
+    info "  (no Route Server $rs)"
+fi
+if pip_exists; then
+    info "  public IP $rs_pip"
+    found=$((found + 1))
+else
+    info "  (no public IP $rs_pip)"
+fi
+if vnet_exists; then
+    rs_cidr="$(subnet_prefix)"
+    if [ -n "$rs_cidr" ]; then
+        info "  subnet $rs_subnet ($rs_cidr) from $vnet"
+        info "  address prefix $rs_cidr from $vnet"
+        found=$((found + 2))
+    else
+        info "  (no $rs_subnet in $vnet)"
+    fi
+else
+    info "  (no vnet $vnet in $net_rg)"
+fi
+info ""
+
+if [ "$found" -eq 0 ]; then
+    info "Nothing to do."
+    exit 0
+fi
+
+# --- peerings -----------------------------------------------------------
+
+# Deleting the Route Server takes its peerings with it, so this step
+# exists for the case where the operator is still running: it will
+# recreate a peering as fast as this removes it, and the Route Server
+# delete then fails on a resource that keeps coming back. Refusing and
+# saying why beats looping.
+#
+# The exception is the cluster having gone, where nothing is left to
+# reconcile and the peerings are just in the way. That is what
+# --delete-peerings is for, and why it is not the default.
+delete_peerings_step() {
+    rs_exists || { info "  no Route Server, so no peerings"; return 0; }
+
+    local names
+    names="$(az network routeserver peering list -g "$rg" --routeserver "$rs" \
+        --query '[].name' -o tsv 2>/dev/null | grep . || true)"
+
+    if [ -z "$names" ]; then
+        info "  no peerings on $rs"
+        return 0
+    fi
+
+    if [ "$delete_peerings" = false ]; then
+        # Only an operator that is actually running can put them back.
+        if oc get cudnbgpconfig >/dev/null 2>&1; then
+            warn "  peerings still on $rs:"
+            printf '%s\n' "$names" | sed 's/^/    /' >&2
+            warn "  These belong to the operator. Delete the CUDNBgpConfig and let it"
+            warn "  withdraw them, then rerun. If the cluster has gone and nothing is"
+            warn "  left to do that, rerun with --delete-peerings."
+            fail "peerings still on $rs"
+            return 0
+        fi
+        info "  no operator reachable; deleting the peerings with the Route Server"
+        return 0
+    fi
+
+    while read -r name; do
+        [ -n "$name" ] || continue
+        info "  deleting peering $name"
+        try az network routeserver peering delete -g "$rg" --routeserver "$rs" \
+            -n "$name" --yes --output none
+    done <<<"$names"
+}
+
+# --- the rest -----------------------------------------------------------
+
+delete_route_server() {
+    rs_exists || { info "  already gone"; return 0; }
+    info "  deleting $rs -- this is as slow as creating it"
+    try az network routeserver delete -g "$rg" -n "$rs" --yes --output none
+}
+
+delete_public_ip() {
+    pip_exists || { info "  already gone"; return 0; }
+    try az network public-ip delete -g "$rg" -n "$rs_pip" --output none
+}
+
+delete_subnet() {
+    vnet_exists || { info "  no vnet $vnet"; return 0; }
+    [ -n "$(subnet_prefix)" ] || { info "  already gone"; return 0; }
+    try az network vnet subnet delete -g "$net_rg" --vnet-name "$vnet" \
+        -n "$rs_subnet" --output none
+}
+
+# The last step, and the one that puts the vnet back as the installer
+# left it. Removing a prefix means rewriting the whole list without it,
+# for the same reason adding one meant rewriting the whole list with it.
+#
+# Nothing is removed unless it is the range the subnet was in, so a vnet
+# somebody widened for their own reasons is not narrowed here.
+delete_address_prefix() {
+    vnet_exists || { info "  no vnet $vnet"; return 0; }
+
+    # The range normally comes from the subnet, read before it was
+    # deleted. A teardown that got as far as the subnet and then failed
+    # leaves nothing to read it from, and the prefix would be stranded
+    # in the vnet with nothing able to name it again. So fall back to
+    # the default the create script uses. Removing it is still
+    # conditional on it actually being there, so a wrong guess removes
+    # nothing.
+    local cidr="${rs_cidr:-${ROUTE_SERVER_CIDR:-10.1.0.0/26}}"
+    [ -n "$rs_cidr" ] || info "  no subnet to read the range from; trying $cidr"
+
+    local remaining
+    remaining="$(az network vnet show -g "$net_rg" -n "$vnet" \
+        --query "addressSpace.addressPrefixes[?@!='$cidr']" -o tsv 2>/dev/null | paste -sd' ' -)"
+
+    if [ -z "$remaining" ]; then
+        warn "  $cidr is the only prefix on $vnet; leaving it rather than"
+        warn "  emptying the address space."
+        return 0
+    fi
+
+    local current
+    current="$(az network vnet show -g "$net_rg" -n "$vnet" \
+        --query "addressSpace.addressPrefixes[?@=='$cidr'] | [0]" -o tsv 2>/dev/null || true)"
+    if [ -z "$current" ] || [ "$current" = "None" ]; then
+        info "  $cidr is not in the address space"
+        return 0
+    fi
+
+    info "  removing $cidr, leaving $remaining"
+    # shellcheck disable=SC2086
+    try az network vnet update -g "$net_rg" -n "$vnet" \
+        --address-prefixes $remaining --output none
+}
+
+# phase, not step: teardown carries on past a failure and reports at the
+# end. Stopping at the first error is how the rest get orphaned.
+phase "peerings on $rs"        delete_peerings_step
+phase "Route Server $rs"       delete_route_server
+phase "public IP $rs_pip"      delete_public_ip
+phase "subnet $rs_subnet"      delete_subnet
+phase "address prefix"         delete_address_prefix
+
+if [ "$dry_run" = false ] && [ "$(failure_count)" = "0" ]; then
+    info "The vnet is back to the address space openshift-install gave it."
+    info "Confirm with azure-list-route-server, which is subscription-wide."
+    info ""
+fi
+
+report

@@ -43,8 +43,11 @@
 !aws-login
 !azure-create-cluster
 !azure-create-install-config
+!azure-create-route-server
+!azure-delete-route-server
 !azure-destroy-cluster
 !azure-installer-credentials
+!azure-list-route-server
 !gcp-create-cloud-router
 !gcp-delete-cloud-router
 !gcp-list-cloud-router

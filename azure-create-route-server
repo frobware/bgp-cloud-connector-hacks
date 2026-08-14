@@ -1,0 +1,459 @@
+#!/usr/bin/env bash
+#
+# Create the Azure Route Server BGP infrastructure a CUDNBgpConfig
+# needs, for a cluster openshift-install built knowing nothing about
+# BGP. The Azure counterpart of aws-create-route-servers and
+# gcp-create-cloud-router, and the same model: a plain cluster first,
+# then this bolts the BGP side on, and azure-delete-route-server takes
+# it off again.
+#
+#   azure-create-route-server --dry-run
+#   azure-create-route-server
+#   azure-create-route-server --prerequisites-only
+#
+# Singular, unlike the AWS script, because Azure allows exactly one
+# Route Server per virtual network. There is no per-zone endpoint to
+# spread across either: a Route Server presents a redundant pair of
+# addresses for the whole vnet and every node peers with both whatever
+# zone it is in. That is the GCP shape rather than the AWS one, and it
+# is why the operator's Azure discovery emits one peer group rather
+# than one per zone.
+#
+# --prerequisites-only builds only the half the operator never creates
+# -- the subnet, the public IP and the Route Server itself -- and
+# leaves the peerings alone. That is the mode the e2e suite wants:
+# those are what the operator reconciles, so a run that finds them
+# already built adopts them, reports no change, and passes every
+# assertion it makes. Build the operator's own work for it and the test
+# proves nothing.
+#
+# LOCAL_ASN is the ASN every node advertises with and must match
+# spec.bgp.localASN in your CUDNBgpConfig. Unlike AWS and GCP there is
+# no ASN to choose for the far side: Azure Route Server is 65515 and
+# `az network routeserver create` has no flag to say otherwise.
+#
+# Router nodes are those carrying ROUTER_NODE_LABEL. Label them first;
+# with none labelled you get the static half and nothing else, which is
+# a legitimate way to run it.
+#
+# Rerunning adopts whatever already exists rather than creating a
+# second set, so it doubles as a check on the current state.
+#
+# The Route Server and its public IP both bill hourly and both live in
+# the cluster's own resource group, so azure-destroy-cluster takes them
+# with it -- unlike the AWS endpoints, which belong to the VPC and
+# outlive the cluster. Tear them down explicitly if you are keeping the
+# cluster.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/azure-lib.bash"
+
+local_asn="${LOCAL_ASN:-65001}"
+router_node_label="${ROUTER_NODE_LABEL:-networking.openshift.io/cudn-bgp-router=}"
+
+# The range RouteServerSubnet is carved from, and the one thing here
+# that reaches into infrastructure the installer owns.
+#
+# Azure requires the Route Server to sit in a dedicated subnet named
+# exactly RouteServerSubnet, minimum /26. It cannot share the master or
+# worker subnet. openshift-install sets the vnet address space equal to
+# machineNetwork and splits all of it between those two, so a cluster it
+# built has no room for a third subnet at any machineNetwork size --
+# shrinking machineNetwork just yields a smaller vnet that is equally
+# full. Extending the vnet by one /26 is therefore the least that lets
+# the bolt-on model work at all on Azure.
+#
+# rh-mobb/aro-bgp reserves 10.0.5.0/24 inside a 10.0.0.0/20 vnet
+# instead, which it can do because ARO always installs into a vnet you
+# made first. That is a different model, not a better one, and it would
+# mean the cluster coming up with the BGP subnet already in it.
+#
+# Must not overlap machineNetwork, clusterNetwork or serviceNetwork.
+# 10.1.0.0/26 clears the installer's 10.0.0.0/16 default.
+rs_cidr="${ROUTE_SERVER_CIDR:-10.1.0.0/26}"
+
+prerequisites_only=false
+parse_common_args "$@"
+for arg in "${rest[@]+"${rest[@]}"}"; do
+    case "$arg" in
+        --prerequisites-only) prerequisites_only=true ;;
+        *) die "unknown option: $arg" \
+            "Usage: ${0##*/} [--dry-run] [--prerequisites-only]" ;;
+    esac
+done
+
+require_cmd az oc jq
+require_azure
+
+# --- the ASN the nodes will use -----------------------------------------
+
+# Azure reserves these and the reservation is not advisory. A node
+# advertising with 65515 puts the Route Server's own ASN in the AS_PATH,
+# so the Route Server discards every route by ordinary BGP loop
+# prevention while the session still reports established -- the same
+# silent shape as the AWS shared-ASN hazard, except guaranteed rather
+# than conditional on a peering ever being made.
+#
+# From the Route Server FAQ, "What Autonomous System Numbers (ASNs) can
+# I use?" and the separate AS_PATH question.
+case "$local_asn" in
+    ''|*[!0-9]*) die "LOCAL_ASN is '$local_asn', which is not a number" ;;
+esac
+
+[ "$local_asn" -ge 1 ] && [ "$local_asn" -le 65534 ] \
+    || die "LOCAL_ASN $local_asn is not a 16-bit ASN" \
+        "Azure Route Server supports 16-bit ASNs only, so 1-65534." \
+        "The private range is 64512-65534."
+
+case "$local_asn" in
+    8074|8075|12076|65515|65517|65518|65519|65520|23456)
+        die "LOCAL_ASN $local_asn is reserved by Azure or IANA" \
+            "Azure reserves 8074, 8075, 12076, 65515 and 65517-65520." \
+            "IANA reserves 23456 and 64496-64511." \
+            "65515 is the Route Server's own ASN, so a node using it has every" \
+            "route discarded by BGP loop prevention while the session still" \
+            "reports established." \
+            "Pick something in 64512-65514 and match spec.bgp.localASN." ;;
+esac
+
+[ "$local_asn" -lt 64496 ] || [ "$local_asn" -gt 64511 ] \
+    || die "LOCAL_ASN $local_asn is in the IANA reserved range 64496-64511" \
+        "Pick something in 64512-65514."
+
+# --- what the cluster is ------------------------------------------------
+
+oc whoami >/dev/null 2>&1 || die "not connected to a cluster" \
+    "This reads the region, resource group and nodes from the running cluster." \
+    "export KUBECONFIG=<cluster>/auth/kubeconfig"
+
+platform="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.type}')"
+[ "$platform" = "Azure" ] || die "cluster platform is $platform, not Azure" \
+    "aws-create-route-servers and gcp-create-cloud-router are the others."
+
+infra="$(oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}')"
+rg="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.azure.resourceGroupName}')"
+
+# Normally the same as resourceGroupName. Azure populates it either
+# way, unlike the optional-looking field it appears to be, so it is
+# read rather than inferred and only differs for a cluster installed
+# into a vnet it does not own.
+net_rg="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.azure.networkResourceGroupName}' 2>/dev/null || true)"
+: "${net_rg:=$rg}"
+
+[ -n "$infra" ] && [ -n "$rg" ] \
+    || die "could not read infrastructureName and resourceGroupName from the cluster"
+
+# The subscription az is pointed at, which is not necessarily the one
+# the cluster is in. Compared rather than assumed, for the reason
+# azure-create-cluster gives: a query against the wrong subscription
+# answers confidently and wrongly.
+subscription="$(azure_active_subscription)"
+[ -n "$subscription" ] || die "az has no subscription selected" \
+    "Pick one: az account set --subscription <id>"
+
+# The region comes from the resource group, not from the cluster.
+# Unlike AWS and GCP, Azure's infrastructure status carries no region:
+# .status.platformStatus.azure has cloudName, resourceGroupName and
+# networkResourceGroupName and nothing else. The resource group is the
+# better source anyway, since everything created here goes into it and
+# Azure requires a resource to match its group's location.
+#
+# This doubles as the check that the cluster is in the subscription az
+# is pointed at, because a group in another subscription is not visible
+# at all.
+region="$(az group show -n "$rg" --query location -o tsv 2>/dev/null || true)"
+[ -n "$region" ] \
+    || die "resource group $rg is not visible in subscription $subscription" \
+        "The cluster is probably in a different subscription from the one az is on." \
+        "Switch: az account set --subscription <id>"
+
+# Names carry the infra id, as on AWS and GCP, so everything this
+# creates is identifiable as one cluster's and nothing collides in a
+# shared subscription.
+#
+# The subnet is the exception and is not ours to name: Azure requires it
+# to be called exactly RouteServerSubnet and rejects --hosted-subnet
+# pointing at anything else.
+rs="$infra-rs"
+rs_pip="$infra-rs-pip"
+rs_subnet="RouteServerSubnet"
+
+info "Cluster:          $infra"
+info "Subscription:     $subscription"
+info "Region:           $region"
+info "Resource group:   $rg"
+[ "$net_rg" != "$rg" ] && info "Network group:    $net_rg (vnet the cluster does not own)"
+info "Node ASN:         $local_asn"
+info "Route Server ASN: 65515 (fixed by Azure)"
+info ""
+
+# --- the vnet -----------------------------------------------------------
+
+# By tag rather than by name. The installer names it <infra>-vnet today
+# and that has been stable, but it tags what it owns, and a tag survives
+# a naming change that would leave a hardcoded name matching nothing at
+# all -- which reads exactly like "no vnet" rather than like a bug.
+vnet_tag="sigs.k8s.io_cluster-api-provider-azure_cluster_$infra"
+vnet="$(az network vnet list -g "$net_rg" \
+    --query "[?tags.\"$vnet_tag\"=='owned'].name | [0]" -o tsv 2>/dev/null || true)"
+
+if [ -z "$vnet" ] || [ "$vnet" = "None" ]; then
+    vnet="$infra-vnet"
+    warn "No vnet in $net_rg tagged $vnet_tag=owned; falling back to the name $vnet."
+fi
+
+az network vnet show -g "$net_rg" -n "$vnet" --output none 2>/dev/null \
+    || die "no virtual network $vnet in resource group $net_rg" \
+        "Looked for one tagged $vnet_tag=owned first, then for that name."
+
+vnet_prefixes="$(az network vnet show -g "$net_rg" -n "$vnet" \
+    --query 'addressSpace.addressPrefixes' -o tsv 2>/dev/null | paste -sd' ' -)"
+
+info "Virtual network $vnet:"
+info "  address space $vnet_prefixes"
+while read -r sname sprefix; do
+    [ -n "$sname" ] || continue
+    info "  subnet $sname  $sprefix"
+done < <(az network vnet show -g "$net_rg" -n "$vnet" \
+    --query 'subnets[].[name,addressPrefix]' -o tsv 2>/dev/null || true)
+info ""
+
+# --- address space ------------------------------------------------------
+
+# Adding a prefix does not disturb the existing subnets or anything on
+# them, but it is still a change to something openshift-install made, so
+# it is said out loud rather than done quietly.
+# azure-delete-route-server removes it again.
+ensure_address_prefix() {
+    local have
+    have="$(az network vnet show -g "$net_rg" -n "$vnet" \
+        --query "addressSpace.addressPrefixes[?@=='$rs_cidr'] | [0]" -o tsv 2>/dev/null || true)"
+
+    if [ -n "$have" ] && [ "$have" != "None" ]; then
+        info "  $rs_cidr already in the address space"
+        return 0
+    fi
+
+    info "  adding $rs_cidr to $vnet (installer-owned; existing subnets untouched)"
+
+    # update replaces the list wholesale, so the existing prefixes have
+    # to be repeated or they are dropped, which would orphan every
+    # subnet in the vnet.
+    # shellcheck disable=SC2086
+    try az network vnet update -g "$net_rg" -n "$vnet" \
+        --address-prefixes $vnet_prefixes "$rs_cidr" --output none
+}
+
+info "Address range $rs_cidr:"
+ensure_address_prefix || die "could not add $rs_cidr to $vnet"
+info ""
+
+# --- the subnet ---------------------------------------------------------
+
+ensure_subnet() {
+    local have
+    have="$(az network vnet subnet show -g "$net_rg" --vnet-name "$vnet" -n "$rs_subnet" \
+        --query addressPrefix -o tsv 2>/dev/null || true)"
+
+    if [ -n "$have" ]; then
+        info "  adopting existing $rs_subnet ($have)"
+        return 0
+    fi
+
+    info "  creating $rs_subnet ($rs_cidr)"
+    # No NSG and no route table, and not by omission: Azure supports
+    # neither on this subnet and rejects both, so there is nothing to
+    # decide.
+    try az network vnet subnet create -g "$net_rg" --vnet-name "$vnet" \
+        -n "$rs_subnet" --address-prefixes "$rs_cidr" --output none
+}
+
+info "Subnet $rs_subnet:"
+ensure_subnet || die "could not create $rs_subnet in $vnet"
+info ""
+
+# --- the public ip ------------------------------------------------------
+
+# Required by the API and not for anything you route through: Azure uses
+# it to reach the Route Server's own management backend, and no cluster
+# traffic goes near it. Standard SKU and static allocation are the only
+# combination it accepts. It bills like any other static address.
+ensure_public_ip() {
+    if az network public-ip show -g "$rg" -n "$rs_pip" --output none 2>/dev/null; then
+        info "  adopting existing $rs_pip"
+        return 0
+    fi
+    info "  creating $rs_pip (Standard, static)"
+    try az network public-ip create -g "$rg" -n "$rs_pip" \
+        --sku Standard --allocation-method Static --version IPv4 \
+        --location "$region" --output none
+}
+
+info "Public IP $rs_pip:"
+ensure_public_ip || die "could not create the public IP $rs_pip"
+info ""
+
+# --- the route server ---------------------------------------------------
+
+# The Route Server FAQ puts deployment at 30 to 60 minutes and
+# recommends booking an hour for it. Said here because this is where a
+# run sits, and a wait that long with nothing printed reads as a hang
+# rather than as the documented behaviour.
+#
+# branch-to-branch and hub-routing-preference are deliberately left at
+# their defaults, though rh-mobb/aro-bgp sets both. They govern how the
+# Route Server arbitrates between ExpressRoute and VPN gateways, and
+# there are none here; setting them would be copying a reference estate
+# rather than configuring anything.
+ensure_route_server() {
+    if az network routeserver show -g "$rg" -n "$rs" --output none 2>/dev/null; then
+        info "  adopting existing Route Server $rs"
+        return 0
+    fi
+
+    local subnet_id
+    subnet_id="$(az network vnet subnet show -g "$net_rg" --vnet-name "$vnet" -n "$rs_subnet" \
+        --query id -o tsv 2>/dev/null || true)"
+
+    if [ -z "$subnet_id" ]; then
+        [ "$dry_run" = true ] || return 1
+        subnet_id="<id of $rs_subnet, which a dry run has not created>"
+    fi
+
+    info "  creating $rs -- Azure documents this as taking 30 to 60 minutes"
+    try az network routeserver create -g "$rg" -n "$rs" \
+        --hosted-subnet "$subnet_id" \
+        --public-ip-address "$rs_pip" \
+        --location "$region" --output none
+}
+
+info "Route Server $rs:"
+ensure_route_server || die "could not create the Route Server $rs"
+info ""
+
+if [ "$dry_run" = true ]; then
+    info "Would then read back its addresses and peer each router node with them."
+    report
+    exit $?
+fi
+
+# --- what it came up as -------------------------------------------------
+
+# Read back rather than predicted. The ASN is documented as 65515 and
+# the addresses are allocated out of RouteServerSubnet, so neither is
+# ours to know, and a peering built against a guess fails in a way that
+# looks like a BGP problem rather than a wrong address.
+rs_asn="$(az network routeserver show -g "$rg" -n "$rs" --query virtualRouterAsn -o tsv 2>/dev/null || true)"
+rs_ips="$(az network routeserver show -g "$rg" -n "$rs" --query 'virtualRouterIps[]' -o tsv 2>/dev/null | grep . || true)"
+
+[ -n "$rs_ips" ] || die "Route Server $rs reports no addresses" \
+    "A Route Server peers from a redundant pair, and one with none has not" \
+    "finished provisioning. Check it and rerun:" \
+    "  az network routeserver show -g $rg -n $rs -o json"
+
+info "Route Server addresses:"
+while read -r ip; do
+    [ -n "$ip" ] || continue
+    info "  $ip  asn=${rs_asn:-unknown}"
+done < <(printf '%s\n' "$rs_ips")
+info ""
+
+[ "$rs_asn" = "65515" ] || warn "Route Server ASN is ${rs_asn:-unknown}, not the documented 65515."
+
+[ "$rs_asn" != "$local_asn" ] || die "the Route Server and the nodes are both ASN $local_asn" \
+    "That makes the session iBGP, which is not what any of this is for."
+
+# --- peerings -----------------------------------------------------------
+
+# Name and internal IP for every labelled node. The internal IP is the
+# NIC address the Route Server peers with, and the only thing a peering
+# actually needs -- there is no instance to name, unlike GCP, and no
+# per-node attribute to set, unlike both other clouds. Azure needs
+# neither SourceDestCheck cleared nor canIpForward enabled.
+nodes="$(oc get nodes -l "$router_node_label" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' \
+    | grep . || true)"
+
+# The operator's own naming, from internal/platform/azure/peers.go:
+# <clusterID>-bgp-<address with dots as dashes>, truncated to Azure's
+# 80-character limit for a BGP connection name.
+#
+# Matched exactly, and this is the whole reason the peering block exists
+# in this form. A BGP connection carries no tags, so the name is the
+# only ownership signal there is, and the operator prunes only names
+# carrying its prefix. A peering made here under any other name would be
+# invisible to it: the operator would create its own alongside, and the
+# ones from here would linger as orphans that nothing collects.
+peering_name() {
+    local suffix="-${1//./-}"
+    local prefix="$infra-bgp"
+    if [ $(( ${#prefix} + ${#suffix} )) -gt 80 ]; then
+        prefix="${prefix:0:$(( 80 - ${#suffix} ))}"
+    fi
+    printf '%s%s' "$prefix" "$suffix"
+}
+
+if [ "$prerequisites_only" = true ]; then
+    info "Skipping peerings: --prerequisites-only, the operator creates them"
+    info ""
+elif [ -z "$nodes" ]; then
+    warn "No nodes carry $router_node_label."
+    warn "The static half is built. Label them and rerun to get the peerings:"
+    warn "  oc label node <node> $router_node_label"
+    info ""
+else
+    # Sixteen is the documented per-Route-Server limit and a hard one:
+    # the seventeenth create fails rather than queues. Said before
+    # building any of them rather than part way through.
+    count="$(printf '%s\n' "$nodes" | grep -c .)"
+    [ "$count" -le 16 ] || die "$count router nodes, and a Route Server takes 16 BGP peers" \
+        "Label fewer nodes."
+
+    existing="$(az network routeserver peering list -g "$rg" --routeserver "$rs" \
+        --query '[].name' -o tsv 2>/dev/null | grep . || true)"
+
+    info "BGP peerings, one per node:"
+    while read -r name ip; do
+        [ -n "$name" ] || continue
+        peer="$(peering_name "$ip")"
+        if printf '%s\n' "$existing" | grep -qx "$peer"; then
+            info "  $peer already exists"
+            continue
+        fi
+        info "  adding $peer -> $ip ($name)"
+        try az network routeserver peering create -g "$rg" --routeserver "$rs" \
+            -n "$peer" --peer-ip "$ip" --peer-asn "$local_asn" --output none \
+            || fail "peering $peer"
+    done < <(printf '%s\n' "$nodes")
+    info ""
+fi
+
+# --- what to do with it -------------------------------------------------
+
+cat <<EOF
+Put this in your CUDNBgpConfig:
+
+  spec:
+    platform: Azure
+    azure:
+      subscriptionID: $subscription
+      resourceGroup: $rg
+      routeServerName: $rs
+    bgp:
+      localASN: $local_asn
+
+The neighbours are not listed and must not be: the operator reads the
+Route Server's VirtualRouterIPs and VirtualRouterAsn from Azure itself,
+which is why spec.azure names the server rather than its addresses.
+It also sets ebgpMultiHop on every neighbour, because the Route Server
+is not on the node's link -- Azure's own FRR example omits that and is
+wrong; rh-mobb/aro-bgp sets it and works.
+
+Check the sessions once the operator has run:
+
+  oc get bgpsessionstates -A
+  azure-list-route-server
+EOF
+
+report

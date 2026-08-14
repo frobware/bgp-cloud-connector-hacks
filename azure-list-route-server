@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+#
+# Show every Azure Route Server in the subscription, the vnet each one
+# sits in, and the live state of every BGP peering on it.
+#
+#   azure-list-route-server
+#   AZURE_SUBSCRIPTION=<id> azure-list-route-server
+#
+# Deliberately subscription-wide rather than scoped to your cluster, for
+# the same reason aws-list-route-servers is account-wide and
+# gcp-list-cloud-router is project-wide: these outlive the clusters they
+# were built for. A peering naming an address no node answers on is the
+# drift a node replacement leaves behind, and the thing the operator
+# exists to reconcile -- a registration nothing will dial from again,
+# next to a live node nothing has registered.
+#
+# On Azure a Route Server does at least share the cluster's resource
+# group, so azure-destroy-cluster takes it with the rest. That makes an
+# orphan here rarer than on AWS, where endpoints belong to the VPC and
+# survive the cluster entirely. Rarer, not impossible: a Route Server in
+# a resource group of its own, or one whose cluster was torn down by
+# hand, both persist and both bill.
+#
+# Read-only.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/azure-lib.bash"
+
+[ $# -eq 0 ] || die "unknown option: $1" "Usage: ${0##*/}"
+
+require_cmd az
+require_azure
+
+if [ -n "${AZURE_SUBSCRIPTION:-}" ]; then
+    az account set --subscription "$AZURE_SUBSCRIPTION" \
+        || die "cannot select subscription $AZURE_SUBSCRIPTION"
+fi
+
+subscription="$(azure_active_subscription)"
+[ -n "$subscription" ] || die "az has no subscription selected" \
+    "Pick one: az account set --subscription <id>"
+
+# Empty when no cluster is reachable, which is fine. It only decides
+# whether something gets flagged as this cluster's.
+mine=""
+if oc whoami >/dev/null 2>&1; then
+    platform="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.type}' 2>/dev/null || true)"
+    [ "$platform" = "Azure" ] && \
+        mine="$(oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}' 2>/dev/null || true)"
+fi
+
+info "Subscription: $subscription"
+[ -n "$mine" ] && info "Cluster:      $mine"
+info ""
+
+# Every private address on every NIC in the subscription, fetched once.
+# The alternative is a lookup per peering, and there is no single call
+# that answers "is anything listening on this address", so this is the
+# closest available: an address no NIC holds is an address no node can
+# possibly be peering from.
+#
+# A NIC exists for a stopped VM too, so this under-reports orphans
+# rather than over-reporting them, which is the right way round for
+# something whose output is used to decide what to delete.
+live_addresses="$(az network nic list \
+    --query '[].ipConfigurations[].privateIPAddress' -o tsv 2>/dev/null | grep . || true)"
+
+address_live() { printf '%s\n' "$live_addresses" | grep -qx "$1"; }
+
+# --- route servers ------------------------------------------------------
+
+# A Route Server is a virtualHub underneath, and `routeserver list`
+# without a resource group covers the whole subscription.
+servers="$(az network routeserver list \
+    --query '[].[name,resourceGroup,location,virtualRouterAsn]' -o tsv 2>/dev/null | grep . || true)"
+
+if [ -z "$servers" ]; then
+    info "No Route Servers in this subscription."
+    exit 0
+fi
+
+info "Route Servers:"
+while read -r name rg location asn; do
+    [ -n "$name" ] || continue
+
+    marker=""
+    [ -n "$mine" ] && [ "$name" = "$mine-rs" ] && marker="   <- this cluster"
+    info "  $name  $rg  $location  asn=${asn:-none}$marker"
+
+    # The addresses it peers from. A Route Server that reports none has
+    # not finished provisioning, which is worth distinguishing from one
+    # that has no peers.
+    ips="$(az network routeserver show -g "$rg" -n "$name" \
+        --query 'virtualRouterIps[]' -o tsv 2>/dev/null | grep . || true)"
+    if [ -z "$ips" ]; then
+        info "    (no addresses -- still provisioning, or failed)"
+    else
+        info "    addresses: $(printf '%s' "$ips" | paste -sd' ' -)"
+    fi
+
+    # Which vnet it is in, which the Route Server itself will not tell you.
+    # `az network routeserver show` returns no subnet at all -- not an empty
+    # ipConfigurations, not a null hostedSubnet, the property is simply
+    # absent. The association lives on a sub-resource, virtualHubs/<name>
+    # /ipConfigurations, with a single entry named Default, and az has no
+    # command for it. Hence az rest.
+    #
+    # The subnet id carries the vnet name, so one call answers both.
+    subnet_id="$(az rest --method get --url \
+        "https://management.azure.com/subscriptions/$subscription/resourceGroups/$rg/providers/Microsoft.Network/virtualHubs/$name/ipConfigurations?api-version=2024-07-01" \
+        --query 'value[0].properties.subnet.id' -o tsv 2>/dev/null || true)"
+    if [ -n "$subnet_id" ] && [ "$subnet_id" != "None" ]; then
+        vnet_name="${subnet_id#*/virtualNetworks/}"
+        vnet_name="${vnet_name%%/*}"
+        subnet_name="${subnet_id##*/}"
+        info "    vnet: $vnet_name  subnet: $subnet_name"
+    fi
+
+    peerings="$(az network routeserver peering list -g "$rg" --routeserver "$name" \
+        --query '[].[name,peerIp,peerAsn,provisioningState,connectionState]' \
+        -o tsv 2>/dev/null | grep . || true)"
+
+    if [ -z "$peerings" ]; then
+        info "    (no peerings)"
+        info ""
+        continue
+    fi
+
+    while read -r pname pip pasn pstate cstate; do
+        [ -n "$pname" ] || continue
+        if address_live "$pip"; then
+            info "    peering $pname  $pip  asn=$pasn  $pstate/$cstate"
+        else
+            info "    peering $pname  $pip  asn=$pasn  $pstate/$cstate  (no NIC holds $pip - orphaned)"
+        fi
+    done < <(printf '%s\n' "$peerings")
+    info ""
+done < <(printf '%s\n' "$servers")
+
+# The public IP each Route Server required is a separate resource and is
+# not deleted with it by every teardown path, so a stranded one bills
+# quietly under a name nothing else explains.
+orphan_pips="$(az network public-ip list \
+    --query "[?ends_with(name,'-rs-pip') && ipConfiguration==null].[name,resourceGroup]" \
+    -o tsv 2>/dev/null | grep . || true)"
+
+if [ -n "$orphan_pips" ]; then
+    info "Unattached public IPs named like a Route Server's:"
+    while read -r pname prg; do
+        [ -n "$pname" ] || continue
+        info "  $pname  $prg  (attached to nothing, still billing)"
+    done < <(printf '%s\n' "$orphan_pips")
+fi
+
+exit 0
