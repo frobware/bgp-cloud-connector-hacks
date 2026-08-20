@@ -73,7 +73,6 @@ require_gcp
 # that an estate built before the rename does not become unreachable to this
 # script and have to be cleaned up by hand.
 hub="$infra-ncc-hub"
-spoke="$infra-bgp-spoke"
 router="$infra-cudn-cr"
 fw="$infra-bgp-worker-subnet"
 
@@ -104,9 +103,17 @@ hub="$(resolve_name "$hub" "$legacy_hub" describe_hub)"
 fw="$(resolve_name "$fw" "$legacy_fw" describe_fw)"
 
 router_exists() { g compute routers describe "$router" --region="$region" >/dev/null 2>&1; }
-spoke_exists()  { g network-connectivity spokes describe "$spoke" --region="$region" >/dev/null 2>&1; }
 hub_exists()    { g network-connectivity hubs describe "$hub" >/dev/null 2>&1; }
 fw_exists()     { g compute firewall-rules describe "$fw" >/dev/null 2>&1; }
+
+# Every spoke on the hub, whoever made it. Both this script and the operator
+# name spokes from the same prefix and number from it, so there is no single
+# name to describe: ask the hub instead. A hub with any spoke left on it cannot
+# be deleted, so this is also what says whether the hub can go.
+hub_spokes() {
+    g network-connectivity spokes list \
+        --filter="hub:$hub" --format='value(name.basename())' 2>/dev/null | grep . || true
+}
 
 info "Cluster: $infra"
 info "Project: $project"
@@ -126,11 +133,15 @@ if router_exists; then
 else
     info "  (no Cloud Router $router)"
 fi
-if spoke_exists; then
-    info "  spoke $spoke"
-    found=$((found + 1))
+preflight_spokes="$(hub_spokes)"
+if [ -n "$preflight_spokes" ]; then
+    while read -r s; do
+        [ -n "$s" ] || continue
+        info "  spoke $s"
+        found=$((found + 1))
+    done <<<"$preflight_spokes"
 else
-    info "  (no spoke $spoke)"
+    info "  (no spokes on $hub)"
 fi
 if hub_exists; then
     info "  hub $hub"
@@ -158,15 +169,6 @@ fi
 delete_router() {
     router_exists || { info "  already gone"; return 0; }
     try gcloud --project="$project" compute routers delete "$router" --region="$region" --quiet
-}
-
-# Every spoke on the hub, whoever made it. The operator names its own
-# {spokePrefix}-N and shards across them, so the one this script used to
-# create is not the whole story, and a hub with any spoke left on it cannot
-# be deleted.
-hub_spokes() {
-    g network-connectivity spokes list \
-        --filter="hub:$hub" --format='value(name.basename())' 2>/dev/null | grep . || true
 }
 
 # The operator owns its spokes: it creates them, shards them across the

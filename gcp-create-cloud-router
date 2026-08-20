@@ -93,8 +93,19 @@ require_gcp
 # operator with the same estate, and so that running the Terraform later
 # adopts what is here rather than building a second set alongside it.
 hub="$infra-ncc-hub"
-spoke="$infra-bgp-spoke"
 router="$infra-cudn-cr"
+
+# The operator treats this as a prefix and numbers from it, because a spoke
+# holds at most NCCMaxInstancesPerSpoke instances and it shards across as many
+# as it needs. So the one spoke built here is the first of that series rather
+# than a name of its own: called anything else it is a spoke the operator can
+# neither see nor adopt, and it would go on building its own alongside it.
+#
+# That also caps this script at one spoke's worth of nodes. The operator shards
+# and this does not, which is the difference between reconciling an estate and
+# standing one up by hand.
+spoke_prefix="$infra-bgp-spoke"
+spoke="$spoke_prefix-0"
 
 # GCP BGP peers and Cloud Router interfaces are fields inside the
 # router resource, not resources in their own right, so they cannot
@@ -454,7 +465,7 @@ here to keep in step with the one above.
       cloudRouterName: $router
       ncc:
         hubName: $hub
-        spokePrefix: $spoke
+        spokePrefix: $spoke_prefix
 
 cloudRouterName must name the router above and not $infra-network-router,
 the installer's Cloud NAT router. That one has no interfaces and carries
