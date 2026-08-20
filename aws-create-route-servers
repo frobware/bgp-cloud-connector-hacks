@@ -266,10 +266,15 @@ cat <<EOF
 Put this in your CUDNBgpConfig:
 
   spec:
+    platform: AWS
     aws:
       region: $region
       routeServerIDs:
         - $rs
+
+platform and the cloud block have to agree: a CEL rule requires spec.aws
+when the platform is AWS and rejects it on any other, so neither half is
+optional.
 
 Still needed before the operator can reconcile: label the router
 nodes with the key your spec.routerNodeSelector uses, e.g.

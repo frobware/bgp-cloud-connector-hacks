@@ -431,40 +431,35 @@ if [ "$dry_run" = true ]; then
     exit $?
 fi
 
-iface_ips="$(g compute routers describe "$router" --region="$region" \
-    --format='value(interfaces[].ipRange)' 2>/dev/null | tr ';,' '\n' | grep . || true)"
-
 info "Cloud Router interfaces:"
 g compute routers describe "$router" --region="$region" \
     --format='table(interfaces[].name,interfaces[].ipRange,interfaces[].subnetwork.basename())' 2>/dev/null || true
 info ""
 
-# ipRange carries a mask the neighbour address must not. Built here
-# rather than inside the heredoc: a pipeline of seds emitting YAML
-# inside a command substitution is unreadable and breaks silently on an
-# address it did not expect.
-neighbors_block=""
-while read -r ip; do
-    [ -n "$ip" ] || continue
-    neighbors_block+="            - address: ${ip%%/*}"$'\n'
-    neighbors_block+="              remoteASN: $asn"$'\n'
-done < <(printf '%s\n' "$iface_ips")
-neighbors_block="${neighbors_block%$'\n'}"
-
 cat <<EOF
-Put this in your CUDNBgpConfig. There is no spec.gcp yet, so it goes in
-the explicit form -- which is honest about the shape anyway: one entry,
-not one per zone, because a GCP subnet is regional and every node peers
-with the same two addresses.
+Put this in your CUDNBgpConfig. The operator reads the Cloud Router's
+interface addresses and ASN itself, which is why spec.gcp names the
+router rather than its addresses, and why there is no neighbour list
+here to keep in step with the one above.
 
   spec:
+    platform: GCP
+    routerNodeSelector:
+      ${router_node_label%=*}: "${router_node_label#*=}"
     bgp:
       localASN: $local_asn
-      availabilityZones:
-        - nodeSelector:
-            ${router_node_label%=*}: "${router_node_label#*=}"
-          neighbors:
-${neighbors_block}
+    gcp:
+      project: $project
+      region: $region
+      cloudRouterName: $router
+      ncc:
+        hubName: $hub
+        spokePrefix: $spoke
+
+cloudRouterName must name the router above and not $infra-network-router,
+the installer's Cloud NAT router. That one has no interfaces and carries
+the cluster's egress, and it is the only Cloud Router a GCP cluster has by
+default, so it is the obvious one to reach for by mistake.
 
 Still needed before any of it peers:
 
