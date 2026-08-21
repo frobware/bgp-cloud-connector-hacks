@@ -273,9 +273,11 @@ echo
 
 # Phase 2. The cluster itself.
 echo "--- cluster ---"
+cluster_gone=true
 if [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
     if ! try "$installer" destroy cluster --dir="$CLUSTER" --log-level=info; then
         fail "openshift-install destroy cluster"
+        cluster_gone=false
     fi
 else
     echo "  no metadata.json, assuming the cluster is already gone"
@@ -287,6 +289,68 @@ echo
 echo "--- ccoctl residue ---"
 if ! try "$CCOCTL" aws delete --name "$cluster_name" --region "$AWS_REGION"; then
     fail "ccoctl aws delete"
+fi
+echo
+
+# Delete one IAM role, and whatever has to go first: a role still holding
+# policies cannot be deleted, and ccoctl's carry one inline policy named for
+# the role itself. Managed policies are detached too. None are attached
+# today, but a role that acquired one would otherwise fail here for a reason
+# the output would not explain.
+#
+# Every step records rather than returns, so one role that will not go does
+# not decide the fate of the rest.
+delete_role() {
+    local role="$1" p names
+
+    names="$(aws iam list-role-policies --role-name "$role" \
+        --query 'PolicyNames' --output text 2>/dev/null || true)"
+    for p in $names; do
+        [ "$p" = "None" ] && continue
+        aws iam delete-role-policy --role-name "$role" --policy-name "$p" \
+            || fail "deleting inline policy $p from $role"
+    done
+
+    names="$(aws iam list-attached-role-policies --role-name "$role" \
+        --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || true)"
+    for p in $names; do
+        [ "$p" = "None" ] && continue
+        aws iam detach-role-policy --role-name "$role" --policy-arn "$p" \
+            || fail "detaching $p from $role"
+    done
+
+    if aws iam delete-role --role-name "$role"; then
+        info "  deleted iam role $role"
+    else
+        fail "deleting iam role $role"
+    fi
+}
+
+# Phase 3b. ccoctl abandons its whole role phase when a single lookup fails,
+# and a stale role from an unrelated cluster is enough to do it: one 404 on a
+# role that had already gone left six of this cluster's behind, while ccoctl
+# still exited 0 and said nothing. So finish the job here rather than leaving
+# it for phase 4 to report as somebody else's problem.
+#
+# This matches on the cluster name, which the installer's own master and
+# worker roles also carry, so it runs only once the cluster itself has gone.
+# Sweeping those out from under a cluster that is still running takes its
+# credentials away.
+echo "--- ccoctl residue: what it left ---"
+if [ "$dry_run" = true ]; then
+    echo "  (skipped: nothing was deleted)"
+elif [ "$cluster_gone" = false ]; then
+    warn "  skipped: the cluster destroy failed, so the cluster may still be"
+    warn "  running and its own roles share this prefix. Rerun once it succeeds."
+else
+    left="$(aws iam list-roles \
+        --query "Roles[?starts_with(RoleName,'${cluster_name}-')].RoleName" \
+        --output text 2>/dev/null || true)"
+    if [ -z "$left" ]; then
+        echo "  nothing"
+    else
+        for r in $left; do delete_role "$r"; done
+    fi
 fi
 echo
 
