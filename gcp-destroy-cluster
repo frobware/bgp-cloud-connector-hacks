@@ -50,6 +50,19 @@ require_cmd gcloud jq
 
 key_file="${GOOGLE_CREDENTIALS:-$HOME/.secrets/gcp-osServiceAccount.json}"
 
+# Run gcloud as the installer's service account, not as whoever last
+# ran `gcloud auth login`. Everything this script asks gcloud for --
+# require_gcp's project probe and the audit's listings -- is a read
+# that account can make, and its key does not expire, whereas the user
+# login does. Without this, a stale login fails the probe and takes
+# down a teardown that never needed a user credential: the destroy
+# itself already runs under this same key. Guarded because a missing
+# key must reach the message below that names it, not surface as an
+# unexplained gcloud failure here.
+if [ -f "$key_file" ]; then
+    export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$key_file"
+fi
+
 cluster_name="${CLUSTER_NAME:-}"
 infra="${INFRA:-}"
 base_domain="${GCP_BASE_DOMAIN:-}"

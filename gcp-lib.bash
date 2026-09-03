@@ -15,6 +15,13 @@
 # require_gcp checks the first. The scripts that run the installer
 # check the second themselves, in preflight, where a failure lists
 # alongside everything else that is wrong.
+#
+# gcp-destroy-cluster is the exception: it points gcloud at the key
+# too, via CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE, because a teardown
+# needs no user credential and should not be stopped by one that has
+# gone stale. Do not generalise that here -- gcp-installer-credentials
+# mints the key, so it cannot depend on it, and the create scripts
+# discover the base domain as you rather than as the installer.
 
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.bash"
 
