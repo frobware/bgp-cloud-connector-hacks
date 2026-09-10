@@ -34,6 +34,24 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gcp-lib.bash"
 
 require_cmd gcloud
 
+# Run gcloud as the installer's service account rather than as whoever
+# last ran `gcloud auth login`, for the reason gcp-destroy-cluster does
+# it: the user credential's refresh token goes stale and then every
+# call here fails with a reauthentication prompt no script can answer,
+# while the key does not expire. Everything this script asks for is a
+# read that account can make, and the whole point of the script is to
+# be usable when the cluster it was built for has gone -- which is
+# exactly when a stale login is least worth discovering.
+#
+# gcp-lib.bash says not to generalise this, and that still holds: the
+# create scripts discover the base domain as you, and
+# gcp-installer-credentials mints this key so cannot depend on it.
+# Neither is true of a read-only listing.
+key_file="${GOOGLE_CREDENTIALS:-$HOME/.secrets/gcp-osServiceAccount.json}"
+if [ -f "$key_file" ]; then
+    export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$key_file"
+fi
+
 # The project comes from the environment or from whatever cluster is
 # reachable. Unlike the create script this does not insist on a
 # cluster: the whole point is to be usable once the cluster is gone.
