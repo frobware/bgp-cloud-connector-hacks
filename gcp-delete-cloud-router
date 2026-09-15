@@ -28,6 +28,9 @@
 # means the same whole-instance PUT that setting it did, and leaving
 # forwarding permitted on a node breaks nothing. aws-delete-route-servers
 # leaves SourceDestCheck alone for the same reason.
+#
+# Overrides: GOOGLE_CREDENTIALS (default ~/.secrets/gcp-osServiceAccount.json),
+# the key gcloud runs as here.
 
 set -euo pipefail
 
@@ -43,6 +46,23 @@ for arg in "${rest[@]+"${rest[@]}"}"; do
     esac
 done
 require_cmd gcloud
+
+# Run gcloud as the installer's service account rather than as whoever
+# last ran `gcloud auth login`, as gcp-destroy-cluster and
+# gcp-list-cloud-router both do: the user credential's refresh token
+# goes stale and every call then fails with a reauthentication prompt
+# no script can answer, while the key does not expire.
+#
+# That the create side runs as you is not an argument against it here.
+# A hub outlives the cluster it was built for, so the moment you need
+# this script is the moment the login is least likely to be fresh --
+# and naming INFRA by hand, the documented way to use it once the
+# cluster has gone, is exactly that moment. Verified 2026-09-15: two
+# hubs created under the user credential were deleted under the key.
+key_file="${GOOGLE_CREDENTIALS:-$HOME/.secrets/gcp-osServiceAccount.json}"
+if [ -f "$key_file" ]; then
+    export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$key_file"
+fi
 
 # Each of the three can come from the environment or from a running
 # cluster. Reading them one at a time rather than all-or-nothing means
