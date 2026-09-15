@@ -16,10 +16,15 @@
 # check the second themselves, in preflight, where a failure lists
 # alongside everything else that is wrong.
 #
-# gcp-destroy-cluster is the exception: it points gcloud at the key
-# too, via CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE, because a teardown
-# needs no user credential and should not be stopped by one that has
-# gone stale. Do not generalise that here -- gcp-installer-credentials
+# Three scripts point gcloud at the key as well, via
+# CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: gcp-destroy-cluster,
+# gcp-delete-cloud-router and gcp-list-cloud-router. What they share is
+# that each is meant to work after the cluster it was built for has
+# gone, and none of them needs a user credential to do it, so a login
+# that has gone stale should not stop them. That is also exactly when a
+# stale login is most likely, which is the argument.
+#
+# It does not generalise past those three. gcp-installer-credentials
 # mints the key, so it cannot depend on it, and the create scripts
 # discover the base domain as you rather than as the installer.
 
