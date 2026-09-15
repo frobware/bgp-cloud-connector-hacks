@@ -166,7 +166,7 @@ delete_peerings_step() {
 
     if [ "$delete_peerings" = false ]; then
         # Only an operator that is actually running can put them back.
-        if oc get cudnbgpconfig >/dev/null 2>&1; then
+        if oc get bgpcloudconfigurations >/dev/null 2>&1; then
             warn "  peerings still on $rs:"
             printf '%s\n' "$names" | sed 's/^/    /' >&2
             warn "  These belong to the operator. Delete the CUDNBgpConfig and let it"
