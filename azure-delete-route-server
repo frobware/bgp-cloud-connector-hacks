@@ -169,9 +169,9 @@ delete_peerings_step() {
         if oc get bgpcloudconfigurations >/dev/null 2>&1; then
             warn "  peerings still on $rs:"
             printf '%s\n' "$names" | sed 's/^/    /' >&2
-            warn "  These belong to the operator. Delete the CUDNBgpConfig and let it"
-            warn "  withdraw them, then rerun. If the cluster has gone and nothing is"
-            warn "  left to do that, rerun with --delete-peerings."
+            warn "  These belong to the operator. Delete the BGPCloudConfiguration"
+            warn "  and let it withdraw them, then rerun. If the cluster has gone"
+            warn "  and nothing is left to do that, rerun with --delete-peerings."
             fail "peerings still on $rs"
             return 0
         fi

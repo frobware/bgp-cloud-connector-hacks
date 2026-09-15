@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Create the Azure Route Server BGP infrastructure a CUDNBgpConfig
-# needs, for a cluster openshift-install built knowing nothing about
-# BGP. The Azure counterpart of aws-create-route-servers and
-# gcp-create-cloud-router, and the same model: a plain cluster first,
-# then this bolts the BGP side on, and azure-delete-route-server takes
-# it off again.
+# Create the Azure Route Server BGP infrastructure a
+# BGPCloudConfiguration needs, for a cluster openshift-install built
+# knowing nothing about BGP. The Azure counterpart of
+# aws-create-route-servers and gcp-create-cloud-router, and the same
+# model: a plain cluster first, then this bolts the BGP side on, and
+# azure-delete-route-server takes it off again.
 #
 #   azure-create-route-server --dry-run
 #   azure-create-route-server
@@ -28,9 +28,10 @@
 # proves nothing.
 #
 # LOCAL_ASN is the ASN every node advertises with and must match
-# spec.bgp.localASN in your CUDNBgpConfig. Unlike AWS and GCP there is
-# no ASN to choose for the far side: Azure Route Server is 65515 and
-# `az network routeserver create` has no flag to say otherwise.
+# spec.bgp.localASN in your BGPCloudConfiguration. Unlike AWS and GCP
+# there is no ASN to choose for the far side: Azure Route Server is
+# 65515 and `az network routeserver create` has no flag to say
+# otherwise.
 #
 # Router nodes are those carrying ROUTER_NODE_LABEL. Label them first;
 # with none labelled you get the static half and nothing else, which is
@@ -432,7 +433,7 @@ fi
 # --- what to do with it -------------------------------------------------
 
 cat <<EOF
-Put this in your CUDNBgpConfig:
+Put this in your BGPCloudConfiguration:
 
   spec:
     platform: Azure

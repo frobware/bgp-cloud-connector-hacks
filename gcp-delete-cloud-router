@@ -213,9 +213,9 @@ delete_spoke() {
     if [ "$delete_spokes" = false ]; then
         warn "  spokes still attached to $hub:"
         printf '%s\n' "$spokes" | sed 's/^/    /' >&2
-        warn "  These belong to the operator. Delete the CUDNBgpConfig and let it"
-        warn "  withdraw them, then rerun. If the cluster has gone and nothing is"
-        warn "  left to do that, rerun with --delete-spokes."
+        warn "  These belong to the operator. Delete the BGPCloudConfiguration"
+        warn "  and let it withdraw them, then rerun. If the cluster has gone"
+        warn "  and nothing is left to do that, rerun with --delete-spokes."
         fail "spokes still attached to $hub"
         return 0
     fi

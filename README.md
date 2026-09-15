@@ -299,7 +299,7 @@ export KUBECONFIG=clusters/aws-<dir>/auth/kubeconfig
 export AWS_PROFILE=saml
 
 aws-create-route-servers --dry-run
-aws-create-route-servers          # prints the CUDNBgpConfig snippet
+aws-create-route-servers          # prints the BGPCloudConfiguration snippet
 aws-list-route-servers            # account-wide, flags orphans
 aws-delete-route-servers
 ```
@@ -313,9 +313,10 @@ set, so it doubles as a check on the current state.
 Two things worth knowing:
 
 - The Amazon-side ASN (`ASN`, default 65000) must differ from the
-  `localASN` in your CUDNBgpConfig, or the session is not eBGP. The
-  script warns when another route server in the region already uses
-  your ASN, which only matters if the VPCs are ever peered.
+  `localASN` in your BGPCloudConfiguration, or the session is not
+  eBGP. The script warns when another route server in the region
+  already uses your ASN, which only matters if the VPCs are ever
+  peered.
 - Endpoints bill hourly and belong to the VPC, not the cluster, so the
   QE reaper never removes them. `aws-destroy-cluster` deletes them as
   its first phase; `aws-delete-route-servers` on its own is for when

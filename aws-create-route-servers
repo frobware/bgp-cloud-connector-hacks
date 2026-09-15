@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Create the AWS VPC Route Server infrastructure that CUDNBgpConfig
-# expects to discover, for a cluster that was not built by the
-# rosa-bgp Terraform.
+# Create the AWS VPC Route Server infrastructure that a
+# BGPCloudConfiguration expects to discover, for a cluster that was
+# not built by the rosa-bgp Terraform.
 #
 # The operator discovers route servers and endpoints; it never
 # creates them. It creates only the peers, and flips SourceDestCheck
@@ -17,8 +17,8 @@
 # where the saml profile comes from aws-install-saml.
 #
 # ASN sets the Amazon-side ASN and must differ from the localASN in
-# your CUDNBgpConfig. Route server endpoints bill hourly, so tear
-# them down when you are finished.
+# your BGPCloudConfiguration. Route server endpoints bill hourly, so
+# tear them down when you are finished.
 #
 # What this builds tracks rh-mobb/rosa-bgp's vpc1-rs1.tf, because a
 # cluster built by hand and one built by the Terraform should present
@@ -99,7 +99,7 @@ if [ -n "$clash" ]; then
     warn "Fine while the VPCs stay separate. If they are ever peered or"
     warn "joined by a Transit Gateway, routes will be silently discarded."
     warn "Set ASN=<other> to avoid it. The private range is 64512-65534,"
-    warn "and it must differ from localASN in your CUDNBgpConfig."
+    warn "and it must differ from localASN in your BGPCloudConfiguration."
     echo
 fi
 
@@ -263,7 +263,7 @@ print_endpoints
 
 cat <<EOF
 
-Put this in your CUDNBgpConfig:
+Put this in your BGPCloudConfiguration:
 
   spec:
     platform: AWS

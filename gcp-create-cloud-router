@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Create the GCP Cloud Router BGP infrastructure a CUDNBgpConfig needs,
-# for a cluster the rosa-bgp Terraform did not build. The GCP
-# counterpart of aws-create-route-servers.
+# Create the GCP Cloud Router BGP infrastructure a
+# BGPCloudConfiguration needs, for a cluster the rosa-bgp Terraform did
+# not build. The GCP counterpart of aws-create-route-servers.
 #
 #   gcp-create-cloud-router --dry-run
 #   gcp-create-cloud-router
@@ -30,8 +30,8 @@
 #
 # ASN sets the Cloud Router's own ASN and must differ from LOCAL_ASN,
 # which is the ASN every node advertises with and must match
-# spec.bgp.localASN in your CUDNBgpConfig. Equal ASNs make the session
-# iBGP, which is not what any of this is built for.
+# spec.bgp.localASN in your BGPCloudConfiguration. Equal ASNs make the
+# session iBGP, which is not what any of this is built for.
 #
 # Router nodes are those carrying ROUTER_NODE_LABEL. Label them first;
 # with none labelled you get the static half and nothing else, which is
@@ -65,7 +65,7 @@ require_cmd gcloud oc curl python3
 [ "$asn" != "$local_asn" ] || die "ASN and LOCAL_ASN are both $asn" \
     "They are the two ends of an eBGP session and must differ." \
     "The private range is 64512-65534. LOCAL_ASN must match" \
-    "spec.bgp.localASN in your CUDNBgpConfig."
+    "spec.bgp.localASN in your BGPCloudConfiguration."
 
 oc whoami >/dev/null 2>&1 || die "not connected to a cluster" \
     "This reads the project, region and nodes from the running cluster." \
@@ -448,10 +448,10 @@ g compute routers describe "$router" --region="$region" \
 info ""
 
 cat <<EOF
-Put this in your CUDNBgpConfig. The operator reads the Cloud Router's
-interface addresses and ASN itself, which is why spec.gcp names the
-router rather than its addresses, and why there is no neighbour list
-here to keep in step with the one above.
+Put this in your BGPCloudConfiguration. The operator reads the Cloud
+Router's interface addresses and ASN itself, which is why spec.gcp
+names the router rather than its addresses, and why there is no
+neighbour list here to keep in step with the one above.
 
   spec:
     platform: GCP
