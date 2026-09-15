@@ -474,10 +474,13 @@ Differences worth knowing, next to AWS:
   residue and no OIDC-bucket collision to preflight for. The analogous
   check is DNS records for `api.<name>.<domain>` and leftover service
   accounts named for the cluster.
-- No route servers yet. The GCP analogue is Cloud Router, and that
-  side arrives with the bgp-cloud-connector work;
-  [rh-mobb/osd-gcp-cudn-routing](https://github.com/rh-mobb/osd-gcp-cudn-routing)
-  is the prototype to mine.
+- The BGP side is a Cloud Router plus a Network Connectivity Center
+  hub and spoke, not a route server: `gcp-create-cloud-router`,
+  `gcp-list-cloud-router`, `gcp-delete-cloud-router`. Pass
+  `--prerequisites-only` whenever the operator will run. Full mode
+  creates the per-node BGP peers too, the operator creates them again
+  under its own names, and GCP refuses two peers sharing a peer IP on
+  one interface; it is for driving GCP by hand with no operator.
 
 ## Azure
 
@@ -550,8 +553,17 @@ Differences worth knowing, next to GCP:
   long`, starting with the `grep` meant to read it. Filter in
   `--query` instead, where `az` does the matching in Python and hands
   back two lines.
-- No route servers yet. The Azure analogue is Azure Route Server, and
-  that side arrives with the bgp-cloud-connector work, as on GCP.
+- The BGP side is Azure Route Server: `azure-create-route-server`,
+  `azure-list-route-server`, `azure-delete-route-server`. Singular,
+  because Azure allows one per virtual network, and with no per-zone
+  endpoint to spread across -- it presents a redundant pair of
+  addresses for the whole vnet, so the operator emits one peer group
+  rather than one per zone. No far-side ASN to choose either: it is
+  65515 and `az network routeserver create` has no flag to say
+  otherwise. `--prerequisites-only` leaves the peerings to the
+  operator, as on GCP. The Route Server and its public IP bill hourly
+  but live in the cluster's resource group, so
+  `azure-destroy-cluster` takes them, unlike the AWS endpoints.
 
 ## Why bash, mostly
 
