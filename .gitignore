@@ -22,8 +22,6 @@
 !README.md
 !flake.lock
 !flake.nix
-!go.mod
-!go.sum
 
 # Scripts, named one by one. A glob like !aws-* looks tidier and is
 # wrong: it also matches aws-scratch-secret.json, aws-notes.txt and
@@ -40,7 +38,6 @@
 !aws-destroy-cluster
 !aws-install-saml
 !aws-list-route-servers
-!aws-login
 !azure-create-cluster
 !azure-create-install-config
 !azure-create-route-server
@@ -67,8 +64,6 @@
 !bgp-proof-gcp.svg
 !bgp-proof-gcp.png
 
-# Go sources, wherever they live under cmd/.
-!*.go
 
 # Re-denied after the allowances above, because the last matching rule
 # wins and some of these would otherwise be caught by !aws-*.
@@ -77,9 +72,6 @@
 #              auth/kubeconfig, auth/kubeadmin-password, and the
 #              ccoctl service account signing key
 #   bin/       openshift-install and ccoctl, hundreds of megabytes
-#   aws-credential-process
-#              the binary go build drops here, named like a script
 /clusters/
 /bin/
 /.direnv/
-/aws-credential-process

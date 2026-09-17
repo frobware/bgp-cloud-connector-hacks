@@ -43,7 +43,6 @@
             # the shell looks complete when it is not
             curl # get-openshift-install require_cmd's it
             krb5 # kinit, klist
-            go_1_26 # cmd/aws-credential-process
             shellcheck
             shfmt # make fmt
             git

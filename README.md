@@ -18,24 +18,18 @@ Put the repo on your PATH, since the names are already namespaced:
 export PATH="$PWD:$PATH"
 ```
 
-You need the VPN for anything that talks to Red Hat, and a Kerberos
-ticket for anything that mints credentials.
+You need the VPN for anything that talks to Red Hat, and credentials
+in a profile before anything here will run.
 
 ```
-aws-install-saml                  # once per machine
-
-export AWS_ACCOUNT_PASS=<your-pass-entry>      # first line is the account id
-export AWS_ROLE=<account-id>-openshift-installer-restricted
-
-kinit you@IPA.REDHAT.COM
-aws-login                         # skips if the current session still works
 export AWS_PROFILE=saml
 ```
 
-`AWS_ACCOUNT_PASS` names a `pass` entry whose first line is the account
-id. Neither the id nor the entry name is baked into any script here, and
-neither belongs in this file: account numbers and role names are not
-secrets exactly, but they are nobody else's business.
+Nothing here mints them. Every script takes `AWS_PROFILE`, defaulting
+to `saml`, and checks that the identity works before it does anything;
+how the profile gets filled is your business. `aws-install-saml` builds
+Red Hat's `aws-saml.py` if you want the usual route, and prints the
+invocation to mint with.
 
 Put your real values in `.envrc.local`, which `.envrc` sources if it
 exists. Because this repo's `.gitignore` denies by default, any file not
@@ -43,19 +37,21 @@ listed there is ignored, so `.envrc.local` cannot be committed by
 accident:
 
 ```
-export AWS_ACCOUNT_PASS=rhat/aws/some-entry
+export AWS_PROFILE=saml
 export AWS_ROLE=012345678901-openshift-installer-restricted
-export AWS_SESSION_DURATION=3600
 ```
 
-`AWS_ACCOUNT` works too if you would rather say the number out loud.
+Account numbers and role names are not secrets exactly, but they are
+nobody else's business, which is why none of them is baked into a
+script here.
 
 Note the role. `poweruser` cannot create an OIDC provider, so `ccoctl`
 fails partway through an install with `iam:CreateOpenIDConnectProvider
 ... AccessDenied`. You want the openshift-installer-restricted role,
 and it caps sessions at 3600 seconds where poweruser allows 43200.
-`aws-login` retries at 3600 by itself rather than making you work that
-out from the error.
+Ask for more than the cap and AssumeRoleWithSAML refuses outright
+rather than quietly shortening, so whatever mints for you has to ask
+for an hour.
 
 ## What is here
 
@@ -64,7 +60,6 @@ out from the error.
 | `lib.bash` | Shared helpers. Source it, do not run it. |
 | `aws-lib.bash`, `azure-lib.bash`, `gcp-lib.bash` | Cloud-specific helpers layered over `lib.bash` |
 | `aws-install-saml` | Builds `~/.venvs/aws-saml` and installs Red Hat's `aws-saml.py`. Rerun it after a Python bump. The venv points into the Nix store, so the interpreter is pinned by a result symlink at `~/.venvs/aws-saml/nix-python` that keeps `nix-collect-garbage` off it. |
-| `aws-login` | Mints credentials into the `saml` profile, skipping if the current ones still work |
 | `get-openshift-install` | Fetches `openshift-install` from the mirror. No `aws-` prefix: it is the same binary whichever cloud you point it at. |
 | `aws-create-cluster` | Builds a cluster. Preflights everything first and owns the whole sequence. |
 | `aws-create-install-config` | Writes an install-config.yaml. Three masters by default, for the reason below. |
@@ -72,7 +67,6 @@ out from the error.
 | `aws-list-route-servers` | Shows every route server in a region, flagging orphans |
 | `aws-delete-route-servers` | Tears them down again |
 | `aws-destroy-cluster` | Full teardown, including what `openshift-install destroy` leaves behind |
-| `cmd/aws-credential-process` | Credentials that refresh themselves. See below. |
 | `azure-installer-credentials` | One-time: the service principal `openshift-install` needs, if you are allowed to make one |
 | `azure-create-cluster` | Builds an Azure cluster. Same shape as the GCP one. |
 | `azure-create-install-config` | Writes an Azure install-config.yaml |
@@ -117,8 +111,6 @@ The whole sequence, from a machine that has never done this:
 aws-install-saml                        # once per machine
 
 kinit <you>@IPA.REDHAT.COM              # VPN up; whenever the ticket expires
-aws-login --force                       # every hour, see below
-
 # About 45 minutes. PULL_SECRET and SSH_KEY have defaults, but name them
 # anyway: they are the two inputs that come from outside this repo, and an
 # invocation that spells them out documents itself for whoever runs it
@@ -249,9 +241,10 @@ earlier. Preflight warns when your role caps below 90 minutes.
 If it does expire mid-install, nothing is lost. Mint again and resume:
 
 ```
-aws-login --force
 <cluster>/bin/openshift-install wait-for install-complete --dir=<cluster>
 ```
+
+Mint again first, or the resume fails the same way.
 
 ## Cluster directories
 
@@ -362,69 +355,6 @@ This deletes cloud resources and nothing else. For a broader sweep when
 `aws_cleanup.sh` from the aws-sso-cluster repo: it probes NAT gateways,
 load balancers, EBS volumes, VPCs, Elastic IPs and network interfaces,
 which this does not yet.
-
-## Credentials that outlive the install
-
-`cmd/aws-credential-process` exists because a cluster install takes 35
-to 45 minutes and the role that can run `ccoctl` caps sessions at an
-hour. Every install is a race.
-
-`openshift-install` holds one set of static credentials for the whole
-run. The AWS SDK will refresh credentials by itself, but only if they
-arrive through `credential_process` with an `Expiration` attached, and
-`aws-saml.py` writes neither. So this runs `aws-saml.py`, reads back the
-profile it wrote, and emits it as JSON with an expiry.
-
-Build it once, then point a profile at the binary:
-
-```
-go build -o ~/.local/bin/aws-credential-process ./cmd/aws-credential-process
-```
-
-```
-[profile saml-refresh]
-region = us-east-2
-credential_process = /home/you/.local/bin/aws-credential-process
-```
-
-Two things about that stanza. The profile name must differ from the one
-`aws-saml.py` writes into, or the static credentials win. And the path
-has to be absolute: `credential_process` does not expand `~`, and a
-tilde fails with `No such file or directory` quoting the literal path,
-which reads like a missing binary rather than a quoting problem.
-
-Use it by exporting `AWS_PROFILE=saml-refresh` instead of `saml`.
-Nothing else changes.
-
-It caches. The SDK invokes `credential_process` per client, so without a
-cache every `aws` call would re-run `aws-saml.py` and hit Kerberos.
-Credentials are persisted with their expiry under
-`${XDG_CACHE_HOME}/aws-credential-process` and only re-minted within ten
-minutes of expiring.
-
-### What it was measured doing
-
-Verified 2026-08-10 against the QE account with the restricted role.
-
-From a cold cache and a session that had genuinely expired -- the
-static profile was returning `InvalidClientTokenId` -- a call through
-`saml-refresh` returned a valid identity in under three seconds and
-wrote a cache entry carrying an `Expiration` an hour out. A second call
-returned the same identity without touching the cache file, so
-`aws-saml.py` did not run and Kerberos was not hit. With the cached
-expiry rewritten to five minutes out, inside the ten-minute refresh
-window, the next call re-minted and recorded a fresh hour.
-
-That establishes the provider refreshes. It does not by itself prove
-`openshift-install` picks a refresh up mid-run: that is how the SDK is
-documented to behave with a `credential_process` provider, and the
-proof would be an install that outlives its first session.
-
-One assumption is worth knowing. The `Expiration` is computed locally
-as invocation time plus the requested duration, not read back from AWS.
-That is exact while the role caps at the 3600 seconds we ask for, but
-if a role ever granted less than requested, the recorded expiry would
-be optimistic and the refresh would fire too late.
 
 ## GCP
 
@@ -570,9 +500,10 @@ Differences worth knowing, next to GCP:
 These scripts sequence `aws`, `oc`, `ccoctl` and `openshift-install`.
 Rewriting that in Go buys wrappers around four binaries whose failure
 modes you inherit either way, plus a build step. So: bash, until a piece
-genuinely wants to be a program. `aws-credential-process` earned it
-because it parses INI, emits JSON, does clock arithmetic and manages a
-cache, all of which bash does badly.
+genuinely wants to be a program. Minting credentials earned it --
+parsing INI, emitting JSON, clock arithmetic and a cache are all things
+bash does badly -- which is why that lives elsewhere and this does not
+try.
 
 On error handling, `set -euo pipefail` stays as a backstop for the
 command nobody remembered to check. It is not the mechanism. Anything

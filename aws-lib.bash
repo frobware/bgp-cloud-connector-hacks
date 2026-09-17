@@ -15,5 +15,5 @@ require_aws() {
         "${err:-(aws failed without saying anything)}" \
         "Select a profile, e.g. AWS_PROFILE=saml ${0##*/}" \
         "Available: $(aws configure list-profiles 2>/dev/null | tr '\n' ' ')" \
-        "Or mint fresh ones: aws-login --force"
+        "Nothing here mints them: fill the profile first."
 }

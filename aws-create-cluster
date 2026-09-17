@@ -785,8 +785,8 @@ max_session="$(aws iam get-role --role-name "$role_name" \
 if [ "$max_session" != "unknown" ] && [ "$max_session" -lt 5400 ] 2>/dev/null; then
     warn "  WARN  role $role_name caps sessions at ${max_session}s"
     warn "        A cluster install takes 35-45 minutes and the installer"
-    warn "        does not refresh credentials. Mint fresh ones now:"
-    warn "        aws-login --force"
+    warn "        does not refresh credentials, so mint fresh ones now"
+    warn "        rather than partway through."
 fi
 info ""
 
