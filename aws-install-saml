@@ -20,8 +20,13 @@
 # Needs the VPN for gitlab.cee.redhat.com. Running aws-saml.py
 # afterwards needs a Kerberos ticket: kinit <you>@IPA.REDHAT.COM
 #
-# The virtualenv points into the nix store without holding a GC
-# root, so nix-collect-garbage can break it. Rerun this to rebuild.
+# The virtualenv's bin/python is a symlink into the nix store, so a
+# garbage collection used to break it and the error blamed the script
+# rather than the interpreter. The interpreter is now built with a
+# result symlink at $venv/nix-python, which nix registers as an
+# indirect root under /nix/var/nix/gcroots/auto, so the store path
+# survives nix-collect-garbage. Deleting the venv takes the root with
+# it. Rerun this after a Python bump.
 
 set -euo pipefail
 
@@ -53,13 +58,18 @@ fi
 
 echo "Installing into $venv"
 rm -rf "$venv"
+mkdir -p "$venv"
 
-nix shell --impure --expr "$python_env" --command bash -c "
-    set -e
-    python -m venv --system-site-packages '$venv'
-    '$venv/bin/pip' install --quiet --upgrade pip
-    '$venv/bin/pip' install --quiet --upgrade '$repo'
-"
+# Build the interpreter to a result symlink inside the venv, and build
+# it before creating the venv so the root is the very path bin/python
+# ends up pointing at. Nix registers $venv/nix-python as an indirect
+# root, which is what stops nix-collect-garbage taking the interpreter
+# out from under you.
+nix build --impure --expr "$python_env" --out-link "$venv/nix-python"
+
+"$venv/nix-python/bin/python" -m venv --system-site-packages "$venv"
+"$venv/bin/pip" install --quiet --upgrade pip
+"$venv/bin/pip" install --quiet --upgrade "$repo"
 
 if [ ! -x "$venv/bin/aws-saml.py" ]; then
     echo "Error: aws-saml.py not found in $venv/bin after install" >&2

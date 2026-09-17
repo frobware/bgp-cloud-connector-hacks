@@ -63,7 +63,7 @@ out from the error.
 |:---|:---|
 | `lib.bash` | Shared helpers. Source it, do not run it. |
 | `aws-lib.bash`, `azure-lib.bash`, `gcp-lib.bash` | Cloud-specific helpers layered over `lib.bash` |
-| `aws-install-saml` | Builds `~/.venvs/aws-saml` and installs Red Hat's `aws-saml.py`. Rerun it after a Python bump, since the venv points into the Nix store without a GC root. |
+| `aws-install-saml` | Builds `~/.venvs/aws-saml` and installs Red Hat's `aws-saml.py`. Rerun it after a Python bump. The venv points into the Nix store, so the interpreter is pinned by a result symlink at `~/.venvs/aws-saml/nix-python` that keeps `nix-collect-garbage` off it. |
 | `aws-login` | Mints credentials into the `saml` profile, skipping if the current ones still work |
 | `get-openshift-install` | Fetches `openshift-install` from the mirror. No `aws-` prefix: it is the same binary whichever cloud you point it at. |
 | `aws-create-cluster` | Builds a cluster. Preflights everything first and owns the whole sequence. |
