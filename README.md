@@ -27,9 +27,7 @@ export AWS_PROFILE=saml
 
 Nothing here mints them. Every script takes `AWS_PROFILE`, defaulting
 to `saml`, and checks that the identity works before it does anything;
-how the profile gets filled is your business. `aws-install-saml` builds
-Red Hat's `aws-saml.py` if you want the usual route, and prints the
-invocation to mint with.
+how the profile gets filled is your business.
 
 Put your real values in `.envrc.local`, which `.envrc` sources if it
 exists. Because this repo's `.gitignore` denies by default, any file not
@@ -59,7 +57,6 @@ for an hour.
 |:---|:---|
 | `lib.bash` | Shared helpers. Source it, do not run it. |
 | `aws-lib.bash`, `azure-lib.bash`, `gcp-lib.bash` | Cloud-specific helpers layered over `lib.bash` |
-| `aws-install-saml` | Builds `~/.venvs/aws-saml` and installs Red Hat's `aws-saml.py`. Rerun it after a Python bump. The venv points into the Nix store, so the interpreter is pinned by a result symlink at `~/.venvs/aws-saml/nix-python` that keeps `nix-collect-garbage` off it. |
 | `get-openshift-install` | Fetches `openshift-install` from the mirror. No `aws-` prefix: it is the same binary whichever cloud you point it at. |
 | `aws-create-cluster` | Builds a cluster. Preflights everything first and owns the whole sequence. |
 | `aws-create-install-config` | Writes an install-config.yaml. Three masters by default, for the reason below. |
@@ -105,12 +102,9 @@ It is an install-time decision, so getting it wrong means rebuilding.
 
 ## Building a cluster
 
-The whole sequence, from a machine that has never done this:
+The whole sequence, once the `saml` profile works:
 
 ```
-aws-install-saml                        # once per machine
-
-kinit <you>@IPA.REDHAT.COM              # VPN up; whenever the ticket expires
 # About 45 minutes. PULL_SECRET and SSH_KEY have defaults, but name them
 # anyway: they are the two inputs that come from outside this repo, and an
 # invocation that spells them out documents itself for whoever runs it

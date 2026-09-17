@@ -36,7 +36,6 @@
 !aws-create-route-servers
 !aws-delete-route-servers
 !aws-destroy-cluster
-!aws-install-saml
 !aws-list-route-servers
 !azure-create-cluster
 !azure-create-install-config
