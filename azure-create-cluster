@@ -35,7 +35,7 @@
 # Environment:
 #
 #   CLUSTER_USER          default $USER
-#   CLUSTER               cluster directory, default clusters/azure-<YYMMDDHHMM>-<ocp>
+#   CLUSTER               cluster directory, default clusters/<YYMMDDHHMM>-azure-OCP-<version>
 #   OPENSHIFT_INSTALL     default <cluster>/bin/openshift-install, fetched if absent
 #   OCP_CHANNEL           passed to get-openshift-install, default stable-4.22
 #   INSTALL_CONFIG        a config to copy in; the copy's metadata.name
@@ -77,11 +77,10 @@ ocp_version="$(resolve_ocp_version || true)"
     "Check the VPN, the mirror, and OCP_CHANNEL (currently ${OCP_CHANNEL:-stable-4.22})." \
     "Or set OPENSHIFT_INSTALL to a binary you already have."
 
-ocp_tag="$(printf '%s' "$ocp_version" | tr -d '.')"
-
-# azure- in the directory name, because clusters/ mixes clouds and the
+# The timestamp leads so that clusters/ lists in build order whatever
+# the cloud. azure- follows it, because clusters/ mixes clouds and the
 # directory is how you tell which teardown script a cluster wants.
-cluster_dir="${CLUSTER:-$here/clusters/azure-$short_name-$ocp_tag}"
+cluster_dir="${CLUSTER:-$here/clusters/$short_name-azure-OCP-$ocp_version}"
 bin_dir="$cluster_dir/bin"
 pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
 creds_file="$(azure_credentials_file)"

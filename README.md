@@ -141,7 +141,7 @@ the answer you almost always want.
 | Variable | Default | Why you would change it |
 |:---|:---|:---|
 | `CLUSTER_USER` | `$USER` | Your local account name is not the name you want in AWS |
-| `CLUSTER` | `clusters/aws-<short>-<ocp>` | Build somewhere other than inside the repo |
+| `CLUSTER` | `clusters/<YYMMDDHHMM>-aws-OCP-<version>` | Build somewhere other than inside the repo |
 | `AWS_PROFILE` | `saml` | Another profile holds the credentials |
 | `PULL_SECRET` | `~/.secrets/pull-secret.json` | Yours lives elsewhere |
 | `SSH_KEY` | `~/.ssh/id_ed25519.pub` | A different key should reach the nodes |
@@ -243,14 +243,15 @@ Mint again first, or the resume fails the same way.
 ## Cluster directories
 
 One directory per cluster, under `clusters/`, and it owns everything.
-The name is `<cloud>-<YYMMDDHHMM>-<version>`, because `clusters/`
-holds both clouds and the prefix is how you tell which teardown
-script a directory wants. Nothing reads it, though: the destroy
-scripts decide the cloud from `cluster-facts` and `metadata.json`, so
-directories made before the prefix existed keep working.
+The name is `<YYMMDDHHMM>-<cloud>-OCP-<version>`. The timestamp leads
+so that `clusters/` lists in build order whatever the cloud, and the
+cloud is how you tell which teardown script a directory wants.
+Nothing reads the name, though: the destroy scripts decide the cloud
+from `cluster-facts` and `metadata.json`, so directories named any
+other way keep working.
 
 ```
-clusters/aws-2608061003-4228/  the suffix is the OCP version, 4.22.8
+clusters/2608061003-aws-OCP-4.22.8/
   bin/openshift-install        the exact binary that built it
   bin/ccoctl                   from the same payload, patched
   install-config.yaml.bak      the config, with your pull secret inlined
@@ -282,7 +283,7 @@ The operator discovers route servers and endpoints; it never creates
 them. Until the rosa-bgp Terraform exists, these fill the gap:
 
 ```
-export KUBECONFIG=clusters/aws-<dir>/auth/kubeconfig
+export KUBECONFIG=clusters/<YYMMDDHHMM>-aws-OCP-<version>/auth/kubeconfig
 export AWS_PROFILE=saml
 
 aws-create-route-servers --dry-run
@@ -334,7 +335,7 @@ then skips straight to the ccoctl residue, which is the case where
 cleanup matters most:
 
 ```
-export CLUSTER=clusters/aws-2608061003-4228
+export CLUSTER=clusters/2608061003-aws-OCP-4.22.8
 
 aws-destroy-cluster --dry-run
 aws-destroy-cluster
@@ -381,7 +382,7 @@ PULL_SECRET=$HOME/.secrets/pull-secret.json \
 SSH_KEY=$HOME/.ssh/id_ed25519.pub \
   gcp-create-cluster
 
-CLUSTER=clusters/gcp-<dir> gcp-destroy-cluster
+CLUSTER=clusters/<YYMMDDHHMM>-gcp-OCP-<version> gcp-destroy-cluster
 ```
 
 Differences worth knowing, next to AWS:
@@ -448,7 +449,7 @@ PULL_SECRET=$HOME/.secrets/pull-secret.json \
 SSH_KEY=$HOME/.ssh/id_ed25519.pub \
   azure-create-cluster
 
-CLUSTER=clusters/azure-<dir> azure-destroy-cluster
+CLUSTER=clusters/<YYMMDDHHMM>-azure-OCP-<version> azure-destroy-cluster
 ```
 
 Differences worth knowing, next to GCP:

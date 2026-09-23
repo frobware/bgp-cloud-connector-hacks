@@ -2,8 +2,8 @@
 #
 # Tear down a cluster built by gcp-create-cluster.
 #
-#   CLUSTER=$PWD/clusters/gcp-2608101150-4228 gcp-destroy-cluster --dry-run
-#   CLUSTER=$PWD/clusters/gcp-2608101150-4228 gcp-destroy-cluster
+#   CLUSTER=$PWD/clusters/2608101150-gcp-OCP-4.22.8 gcp-destroy-cluster --dry-run
+#   CLUSTER=$PWD/clusters/2608101150-gcp-OCP-4.22.8 gcp-destroy-cluster
 #
 # Shorter than its AWS sibling, and the difference is mint mode. On
 # AWS, ccoctl creates IAM roles, an OIDC provider and an S3 bucket

@@ -2,8 +2,8 @@
 #
 # Tear down a cluster built by azure-create-cluster.
 #
-#   CLUSTER=$PWD/clusters/azure-2608131500-4228 azure-destroy-cluster --dry-run
-#   CLUSTER=$PWD/clusters/azure-2608131500-4228 azure-destroy-cluster
+#   CLUSTER=$PWD/clusters/2608131500-azure-OCP-4.22.8 azure-destroy-cluster --dry-run
+#   CLUSTER=$PWD/clusters/2608131500-azure-OCP-4.22.8 azure-destroy-cluster
 #
 # Shorter than its AWS sibling for the same reason the GCP one is. On
 # AWS, ccoctl creates IAM roles, an OIDC provider and an S3 bucket
