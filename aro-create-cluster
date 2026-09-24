@@ -1,0 +1,398 @@
+#!/usr/bin/env bash
+#
+# Build an Azure Red Hat OpenShift (classic) cluster, checking things
+# first.
+#
+#   aro-create-cluster --dry-run
+#   aro-create-cluster
+#
+# The shape is azure-create-cluster's without the installer: there is
+# no openshift-install, no install-config, no metadata.json and no infra
+# id. One call, az aro create, builds the cluster in about forty
+# minutes; everything else here is the vnet it needs beforehand and the
+# credentials and grant it needs afterwards.
+#
+# An ARO cluster spans two resource groups. The one named after the
+# cluster holds the cluster resource and the vnet, and is yours. The
+# managed one holds the VMs, NICs and load balancers, and carries a deny
+# assignment that excludes only the cluster's own service principal. az
+# aro create would name the managed group aro-<random>, so this passes
+# --cluster-resource-group to make it aro-<cluster name>, which puts it
+# in cluster-facts before it exists rather than only after a successful
+# create.
+#
+# az aro create also registers an AAD application for the cluster
+# principal, with the managed group's name as its display name. az aro
+# delete does not remove it, so teardown has to, and the deterministic
+# name is how it finds one left by a create that died partway.
+#
+# The last phase grants the cluster's principal Network Contributor over
+# the cluster's resource group, as CI's grant-network-role does. The
+# operator needs it to find and peer the Route Server, which lives in
+# that group rather than the managed one.
+#
+# Retrying means running it again, as with the other create scripts: a
+# new name, a new directory, nothing leaking between attempts.
+#
+# Environment:
+#
+#   CLUSTER_USER   default $USER
+#   CLUSTER        cluster directory, default clusters/<YYMMDDHHMM>-aro-OCP-<version>
+#   ARO_VERSION    X.Y.Z, or X.Y for its latest patch; default the
+#                  latest version az aro get-versions offers the region
+#   AZURE_REGION   default centralus
+#   PULL_SECRET    default ~/.secrets/pull-secret.json
+
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+source "$here/azure-lib.bash"
+
+parse_args_only_common "$@"
+
+# The version lookup below needs a working login, so this comes before
+# anything else rather than as a preflight line.
+require_azure
+
+short_name="$(date +%y%m%d%H%M)"
+cluster_user="${CLUSTER_USER:-${USER:-$(whoami)}}"
+cluster_name="$cluster_user-$short_name"
+resource_group="$cluster_name"
+vnet="$cluster_name-vnet"
+managed_resource_group="aro-$cluster_name"
+region="${AZURE_REGION:-centralus}"
+pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
+subscription="$(azure_active_subscription)"
+
+# Versions differ by region, so the answer is always the region's. X.Y
+# resolves to its latest patch, as the CI step does; the resolved
+# version is always passed to az aro create, so the directory name
+# cannot disagree with what was built.
+resolve_aro_version() {
+    local want="${ARO_VERSION:-}" available
+    available="$(az aro get-versions -l "$region" -o tsv)" || return 1
+    if [ -z "$want" ]; then
+        printf '%s\n' "$available" | sort -V | tail -1
+    elif [[ "$want" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        printf '%s\n' "$available" | grep -F "$want." | sort -V | tail -1
+    else
+        printf '%s\n' "$available" | grep -xF "$want"
+    fi
+}
+
+ocp_version="$(resolve_aro_version || true)"
+
+[ -n "$ocp_version" ] || die "no ARO version ${ARO_VERSION:+matching $ARO_VERSION }in $region" \
+    "Available there:" \
+    "$(az aro get-versions -l "$region" -o tsv 2>&1 | sort -V)"
+
+cluster_dir="${CLUSTER:-$here/clusters/$short_name-aro-OCP-$ocp_version}"
+
+# ---------------------------------------------------------------------
+# Predicates
+# ---------------------------------------------------------------------
+
+provider_registered() {
+    local state
+    state="$(az provider show -n Microsoft.RedHatOpenShift --query registrationState -o tsv)" || return 1
+    [ "$state" = "Registered" ] && return 0
+    printf 'Microsoft.RedHatOpenShift is %s\n' "${state:-unknown}" >&2
+    printf 'az provider register -n Microsoft.RedHatOpenShift --wait\n' >&2
+    return 1
+}
+
+# The status of az group exists is its answer, not whether it ran, so
+# an error must not read as "free".
+resource_group_free() {
+    local out
+    out="$(az group exists --name "$1")" || return 1
+    [ "$out" = "false" ]
+}
+
+# A leftover from a create that died after registering the application.
+aad_app_free() {
+    local out
+    out="$(az ad app list --display-name "$1" --query '[].appId' -o tsv)" || return 1
+    [ -z "$out" ] && return 0
+    printf 'already registered: %s\n' "$out" >&2
+    return 1
+}
+
+cluster_dir_free() { [ ! -e "$1/cluster-facts" ]; }
+
+dir_is_empty() {
+    [ ! -d "$1" ] || [ -z "$(ls -A "$1" 2>/dev/null)" ]
+}
+
+name_is_rfc1035() { printf '%s' "$1" | grep -qE '^[a-z]([-a-z0-9]*[a-z0-9])?$'; }
+
+# ---------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------
+
+facts_file() { printf '%s' "$cluster_dir/cluster-facts"; }
+
+# Written before anything exists, so a create that dies at any point
+# leaves the names teardown needs. cloud=aro makes azure-destroy-cluster
+# refuse this directory, which it cannot tear down.
+write_cluster_facts() {
+    mkdir -p "$cluster_dir"
+    cat > "$(facts_file)" <<EOF
+# Written by aro-create-cluster. Survives teardown on purpose.
+cloud=aro
+cluster_name=$cluster_name
+resource_group=$resource_group
+vnet=$vnet
+managed_resource_group=$managed_resource_group
+subscription=$subscription
+region=$region
+ocp_version=$ocp_version
+cluster_dir=$cluster_dir
+EOF
+    info "  wrote $(facts_file)"
+}
+
+write_cluster_envrc() {
+    mkdir -p "$cluster_dir"
+    cat > "$cluster_dir/.envrc" <<'EOF'
+# Written by aro-create-cluster. Keeps the repo's flake shell, then
+# points oc at this cluster.
+source_up_if_exists
+export KUBECONFIG="$PWD/auth/kubeconfig"
+EOF
+    if command -v direnv >/dev/null 2>&1; then
+        if direnv allow "$cluster_dir" 2>/dev/null; then
+            info "  wrote and allowed $cluster_dir/.envrc"
+        else
+            info "  wrote $cluster_dir/.envrc (direnv allow failed, run it yourself)"
+        fi
+    else
+        info "  wrote $cluster_dir/.envrc (no direnv; source it or export KUBECONFIG)"
+    fi
+}
+
+create_resource_group() {
+    az group create --name "$resource_group" --location "$region" --output none
+}
+
+# Addresses and subnet settings are the CI step's (aro-provision-vnet).
+# The Route Server subnet the estate adds later goes in 10.0.4.0/27,
+# which these leave free.
+create_vnet() {
+    az network vnet create -g "$resource_group" -n "$vnet" \
+        --address-prefixes 10.0.0.0/17 --output none &&
+    az network vnet subnet create -g "$resource_group" --vnet-name "$vnet" \
+        -n master-subnet --address-prefixes 10.0.0.0/23 \
+        --service-endpoints Microsoft.ContainerRegistry --output none &&
+    az network vnet subnet create -g "$resource_group" --vnet-name "$vnet" \
+        -n worker-subnet --address-prefixes 10.0.2.0/23 \
+        --service-endpoints Microsoft.ContainerRegistry --output none &&
+    az network vnet subnet update -g "$resource_group" --vnet-name "$vnet" \
+        -n master-subnet --private-link-service-network-policies Disabled \
+        --output none
+}
+
+create_cluster() {
+    local status=0
+    az aro create -g "$resource_group" -n "$cluster_name" \
+        --location "$region" --version "$ocp_version" \
+        --vnet "$vnet" --master-subnet master-subnet --worker-subnet worker-subnet \
+        --cluster-resource-group "$managed_resource_group" \
+        --pull-secret "$pull_secret" \
+        --output json > "$cluster_dir/aro-cluster.json" || status=$?
+    # Here as well as in the phase below, which a failed create never
+    # reaches: a create that dies after registering the application is
+    # exactly when teardown needs its id.
+    record_cluster_principal || true
+    return "$status"
+}
+
+# The application's client id, for teardown to delete. Read from the
+# cluster resource when there is one; otherwise from AAD by display
+# name, which is the only record a create that died before the cluster
+# resource existed leaves behind.
+record_cluster_principal() {
+    if grep -q '^client_id=' "$(facts_file)" 2>/dev/null; then
+        info "  cluster principal already recorded"
+        return 0
+    fi
+    local id
+    id="$(az aro show -g "$resource_group" -n "$cluster_name" \
+        --query servicePrincipalProfile.clientId -o tsv 2>/dev/null)" || id=""
+    [ -n "$id" ] || id="$(az ad app list --display-name "$managed_resource_group" \
+        --query '[0].appId' -o tsv 2>/dev/null)" || id=""
+    if [ -z "$id" ]; then
+        warn "  no cluster principal found, nothing recorded"
+        return 1
+    fi
+    printf 'client_id=%s\n' "$id" >> "$(facts_file)"
+    info "  recorded client_id=$id"
+}
+
+# The managed group comes from what the cluster reports rather than
+# from what was asked for; a disagreement means the facts file is
+# wrong, and teardown should hear about it now.
+check_managed_group() {
+    local actual
+    actual="$(az aro show -g "$resource_group" -n "$cluster_name" \
+        --query clusterProfile.resourceGroupId -o tsv)" || return 1
+    actual="${actual##*/}"
+    if [ "$actual" != "$managed_resource_group" ]; then
+        warn "  cluster reports managed group $actual, facts say $managed_resource_group"
+        return 1
+    fi
+    info "  managed group $actual"
+}
+
+# Same layout as the installer's auth/, so everything that expects it
+# works unchanged.
+fetch_credentials() {
+    mkdir -p "$cluster_dir/auth"
+    if [ ! -f "$cluster_dir/auth/kubeconfig" ]; then
+        az aro get-admin-kubeconfig -g "$resource_group" -n "$cluster_name" \
+            --file "$cluster_dir/auth/kubeconfig" || return 1
+        chmod 600 "$cluster_dir/auth/kubeconfig"
+    fi
+    ( umask 077
+      az aro list-credentials -g "$resource_group" -n "$cluster_name" \
+          --query kubeadminPassword -o tsv > "$cluster_dir/auth/kubeadmin-password" ) || return 1
+    info "  wrote $cluster_dir/auth/kubeconfig and kubeadmin-password"
+}
+
+cluster_oc() { KUBECONFIG="$cluster_dir/auth/kubeconfig" oc "$@"; }
+
+group_scope() { printf '/subscriptions/%s/resourceGroups/%s' "$subscription" "$resource_group"; }
+
+grant_visible() {
+    local n
+    n="$(az role assignment list --assignee "$1" --scope "$(group_scope)" \
+        --query "[?roleDefinitionName=='Network Contributor'] | length(@)" -o tsv 2>/dev/null)"
+    [ -n "$n" ] && [ "$n" != "0" ]
+}
+
+# The principal is whichever one kube-system/azure-credentials names,
+# because that is what CCO passthrough hands the operator. Visibility is
+# waited for rather than assumed: CI measured it at twenty seconds, over
+# two minutes, and six minutes.
+grant_network_role() {
+    local client_id object_id
+    client_id="$(cluster_oc -n kube-system get secret azure-credentials \
+        -o jsonpath='{.data.azure_client_id}' | base64 -d)" || return 1
+    [ -n "$client_id" ] || { warn "  kube-system/azure-credentials has no azure_client_id"; return 1; }
+    object_id="$(az ad sp show --id "$client_id" --query id -o tsv)" || return 1
+    az role assignment create --assignee-object-id "$object_id" \
+        --assignee-principal-type ServicePrincipal --role "Network Contributor" \
+        --scope "$(group_scope)" --output none || return 1
+    info "  granted Network Contributor over $resource_group to $client_id"
+    wait_until 720 20 "the role assignment to become visible" grant_visible "$object_id"
+}
+
+# Conditions, never columns; see CLAUDE.md.
+operators_total() {
+    cluster_oc get co -o json 2>/dev/null | jq -r '.items | length'
+}
+
+operators_unavailable() {
+    cluster_oc get co -o json 2>/dev/null \
+        | jq -r '[.items[] | select(([(.status.conditions // [])[]
+            | select(.type=="Available") | .status] | first) != "True")
+            | .metadata.name] | join(" ")'
+}
+
+all_operators_available() {
+    local bad total
+    bad="$(operators_unavailable)"
+    total="$(operators_total)"
+    [ -n "$total" ] || return 1
+    if [ -z "$bad" ]; then
+        info "  $total/$total operators Available"
+        return 0
+    fi
+    info "  waiting on: $bad"
+    return 1
+}
+
+verify_cluster() {
+    wait_until 900 30 "every cluster operator to become Available" \
+        all_operators_available \
+        || fail "some operators never became Available, see above"
+    return 0
+}
+
+# ---------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------
+
+info "Cluster:        $cluster_name ($ocp_version, $region)"
+info "Resource group: $resource_group"
+info "Managed group:  $managed_resource_group"
+info "Subscription:   $subscription"
+info "Directory:      $cluster_dir"
+info ""
+
+info "--- preflight ---"
+check "oc on PATH"                         command -v oc
+check "jq on PATH"                         command -v jq
+check "Microsoft.RedHatOpenShift registered" provider_registered
+check "pull secret readable"               jq -e . "$pull_secret"
+check "cluster directory unused"           cluster_dir_free "$cluster_dir"
+check "cluster directory is empty"         dir_is_empty "$cluster_dir"
+check "name is RFC 1035 valid"             name_is_rfc1035 "$cluster_name"
+check "no resource group $resource_group"  resource_group_free "$resource_group"
+check "no resource group $managed_resource_group" \
+    resource_group_free "$managed_resource_group"
+check "no AAD application $managed_resource_group" \
+    aad_app_free "$managed_resource_group"
+abort_if_failed
+info ""
+
+if [ "$dry_run" = true ]; then
+    info "Would create $cluster_name in $region (subscription $subscription)."
+    report
+    exit $?
+fi
+
+cleanup_guidance=false
+on_exit() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ "$cleanup_guidance" = true ]; then
+        warn ""
+        warn "Failed partway through. What may exist is in $(facts_file)."
+        warn "To remove it, in this order:"
+        warn "  az aro show -g $resource_group -n $cluster_name --output none &&"
+        warn "    az aro delete --yes -g $resource_group -n $cluster_name"
+        warn "  az group delete --yes --name $resource_group"
+        warn "  az ad app list --display-name $managed_resource_group --query '[].appId' -o tsv"
+        warn "    and az ad app delete --id <each>"
+    fi
+}
+trap on_exit EXIT
+
+cleanup_guidance=true
+
+step  "cluster .envrc"             write_cluster_envrc
+step  "cluster facts"              write_cluster_facts
+step  "resource group"             create_resource_group
+step  "vnet and subnets"           create_vnet
+step  "create cluster"             create_cluster
+phase "record cluster principal"   record_cluster_principal
+phase "check managed group"        check_managed_group
+step  "fetch credentials"          fetch_credentials
+# phase, not step: a cluster without the grant, or with a sulking
+# operator, is still a cluster you want to keep and look at.
+phase "grant network role"         grant_network_role
+phase "verify operators"           verify_cluster
+
+cleanup_guidance=false
+
+info ""
+info "Cluster:    $cluster_name"
+info "Kubeconfig: $cluster_dir/auth/kubeconfig"
+info "            export KUBECONFIG=$cluster_dir/auth/kubeconfig"
+info "Password:   $cluster_dir/auth/kubeadmin-password"
+info ""
+info "Tear it down with:"
+info "  az aro delete --yes -g $resource_group -n $cluster_name"
+info "  az group delete --yes --name $resource_group"
+info "  az ad app delete --id \$(grep ^client_id= $(facts_file) | cut -d= -f2)"
+report
