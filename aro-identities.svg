@@ -118,7 +118,7 @@
   <text class="boxlbl" x="54" y="156">You</text>
   <text class="mono" x="54" y="177">your Red Hat login</text>
   <text class="dim" x="54" y="199">A user in the tenant.</text>
-  <text class="dim" x="54" y="217">Owner on the subscription (per ARO.md).</text>
+  <text class="dim" x="54" y="217">Owner on the subscription.</text>
   <text class="dim" x="54" y="239">az aro create runs as you: it registers</text>
   <text class="dim" x="54" y="257">the cluster principal and assigns its</text>
   <text class="dim" x="54" y="275">roles, so you need the rights for both.</text>
@@ -211,8 +211,8 @@
   <rect class="nicchip" x="672" y="767" width="556" height="46" rx="5"/>
   <text class="mono" x="686" y="787">worker NIC: enableIPForwarding = true</text>
   <text class="dim" x="686" y="805">The write the operator makes on each router node.</text>
-  <text class="warn" x="670" y="838">Open question: does the cluster principal hold join/action</text>
-  <text class="warn" x="670" y="856">on the pools? The deny does not stop it; the role is unobserved.</text>
+  <text class="good" x="670" y="838">The cluster principal's Contributor includes join/action, and</text>
+  <text class="good" x="670" y="856">the deny exempts it. The write itself is not yet observed.</text>
   <text class="dim" x="670" y="880">A CI principal writing here got LinkedAuthorizationFailed.</text>
 
   <!-- ============================================================ -->
@@ -232,8 +232,8 @@
 
   <!-- Cluster principal: into the managed group -->
   <path class="a-c" d="M820,300 V418" marker-end="url(#mc)"/>
-  <text class="lbl-c halo" x="830" y="334">Contributor, per CI's</text>
-  <text class="lbl-c halo" x="830" y="350">grant-network-role notes</text>
+  <text class="lbl-c halo" x="830" y="334">Contributor, set by</text>
+  <text class="lbl-c halo" x="830" y="350">the resource provider</text>
 
   <!-- RP: operates the managed group -->
   <path class="a-r" d="M1130,300 V418" marker-end="url(#mr)"/>
@@ -280,6 +280,5 @@
   <path class="a-o" d="M960,1038 V975 H340 V894" marker-end="url(#mo)"/>
   <text class="lbl-o halo" x="420" y="970">discover and peer the Route Server</text>
 
-  <text class="dim" x="20" y="1220">Sources: the az 2.88 aro module (what az aro create registers and which roles it assigns), openshift/release#85681 grant-network-role, ARO.md.</text>
-  <text class="dim" x="20" y="1240">Not checked directly: your Owner role (from ARO.md) and the cluster principal's Contributor on the managed group (from the CI step's comment).</text>
+  <text class="dim" x="20" y="1220">Sources: role and deny assignments read off a live cluster on 2026-09-24, the az 2.88 aro module, openshift/release#85681 grant-network-role.</text>
 </svg>
