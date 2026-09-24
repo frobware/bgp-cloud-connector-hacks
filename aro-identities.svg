@@ -203,17 +203,17 @@
 
   <rect class="res" x="656" y="642" width="588" height="76" rx="6"/>
   <text class="boxlbl" x="670" y="665">Load balancers and their backend address pools</text>
-  <text class="dim" x="670" y="685">Every NIC is joined to a pool. Writing a NIC is also a request to</text>
+  <text class="dim" x="670" y="685">Every VM's NIC is joined to a pool. Writing it is also a request to</text>
   <text class="dim" x="670" y="703">join its pool: .../backendAddressPools/join/action, the linked scope.</text>
 
   <rect class="res" x="656" y="732" width="588" height="164" rx="6"/>
-  <text class="boxlbl" x="670" y="755">NICs, one per VM</text>
+  <text class="boxlbl" x="670" y="755">NICs: one per VM, plus private endpoint and link</text>
   <rect class="nicchip" x="672" y="767" width="556" height="46" rx="5"/>
   <text class="mono" x="686" y="787">worker NIC: enableIPForwarding = true</text>
   <text class="dim" x="686" y="805">The write the operator makes on each router node.</text>
-  <text class="good" x="670" y="838">The cluster principal's Contributor includes join/action, and</text>
-  <text class="good" x="670" y="856">the deny exempts it. The write itself is not yet observed.</text>
-  <text class="dim" x="670" y="880">A CI principal writing here got LinkedAuthorizationFailed.</text>
+  <text class="good" x="670" y="838">Observed 2026-09-24: the cluster principal switched forwarding</text>
+  <text class="good" x="670" y="856">on a pooled worker NIC. Its Contributor includes join/action.</text>
+  <text class="warntxt" x="670" y="880">You and the CI principal: LinkedAuthorizationFailed, same NIC.</text>
 
   <!-- ============================================================ -->
   <!-- Role assignments                                              -->
@@ -259,9 +259,9 @@
   <rect class="box-c" x="470" y="1040" width="340" height="120" rx="8"/>
   <text class="boxlbl" x="484" y="1064">One Secret per component</text>
   <text class="mono" x="484" y="1088">openshift-*/cloud-credentials</text>
-  <text class="dim" x="484" y="1110">machine API, ingress, image registry,</text>
-  <text class="dim" x="484" y="1128">and the operator's own. All of them</text>
-  <text class="dim" x="484" y="1146">authenticate as the cluster principal.</text>
+  <text class="dim" x="484" y="1110">Eight on ARO: CSI, cloud controller,</text>
+  <text class="dim" x="484" y="1128">machine API, ingress, registry and more,</text>
+  <text class="dim" x="484" y="1146">plus ours. All one identity.</text>
 
   <path class="a-g" d="M812,1100 H896" marker-end="url(#mg)"/>
 
