@@ -43,6 +43,7 @@
             # the shell looks complete when it is not
             curl # get-openshift-install require_cmd's it
             krb5 # kinit, klist
+            openssl # aro-hcp-create-cluster signs its admin kubeconfig from a CSR
             shellcheck
             shfmt # make fmt
             git
