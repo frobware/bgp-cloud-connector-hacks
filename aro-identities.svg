@@ -1,0 +1,285 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 1270" width="1320" height="1270" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    :root { color-scheme: light dark; }
+
+    .bg      { fill: #ffffff; }
+    .title   { fill: #14161a; font-size: 22px; font-weight: 700; }
+    .sub     { fill: #5b6470; font-size: 13px; }
+    .scope   { fill: #14161a; font-size: 15px; font-weight: 700; }
+    .boxlbl  { fill: #14161a; font-size: 14px; font-weight: 600; }
+    .dim     { fill: #5b6470; font-size: 12px; }
+    .mono    { fill: #14161a; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .good    { fill: #1a7f4b; font-size: 12px; font-weight: 600; }
+    .warn    { fill: #b3341f; font-size: 12px; font-weight: 600; }
+    .warntxt { fill: #b3341f; font-size: 12px; }
+    .lbl-u   { fill: #2f6fb0; font-size: 12px; font-weight: 600; }
+    .lbl-c   { fill: #1a7f4b; font-size: 12px; font-weight: 600; }
+    .lbl-r   { fill: #7a55a8; font-size: 12px; font-weight: 600; }
+    .lbl-o   { fill: #9a6f10; font-size: 12px; font-weight: 600; }
+    .halo    { paint-order: stroke; stroke: #ffffff; stroke-width: 5px; stroke-linejoin: round; }
+
+    .tenant  { fill: #fafbfc; stroke: #98a6b8; stroke-width: 1.5; }
+    .subscr  { fill: #f4f7fb; stroke: #7f95b0; stroke-width: 1.5; }
+    .mine    { fill: #ffffff; stroke: #2f6fb0; stroke-width: 2; }
+    .managed { fill: #ffffff; stroke: #b3341f; stroke-width: 2; }
+    .res     { fill: #f4f7fb; stroke: #98a6b8; stroke-width: 1.2; }
+    .later   { fill: #f4f7fb; stroke: #98a6b8; stroke-width: 1.2; stroke-dasharray: 6 4; }
+    .gotcha  { fill: #fdf0ee; stroke: #b3341f; stroke-width: 1.5; }
+    .nicchip { fill: #fdf6e6; stroke: #b8891f; stroke-width: 2; }
+    .incl    { fill: #f6f1fb; stroke: #8b6bb1; stroke-width: 1.5; stroke-dasharray: 7 5; }
+
+    .card-u  { fill: #eef4fb; stroke: #2f6fb0; stroke-width: 2; }
+    .card-i  { fill: #f2f3f5; stroke: #7a828c; stroke-width: 2; }
+    .card-c  { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 2.5; }
+    .card-r  { fill: #f6f1fb; stroke: #8b6bb1; stroke-width: 2; }
+    .box-c   { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 2; }
+    .box-o   { fill: #fdf6e6; stroke: #b8891f; stroke-width: 2; }
+
+    .a-u     { stroke: #2f6fb0; stroke-width: 2; fill: none; }
+    .a-c     { stroke: #2f8f5b; stroke-width: 2.5; fill: none; }
+    .a-r     { stroke: #8b6bb1; stroke-width: 2; fill: none; }
+    .a-o     { stroke: #b8891f; stroke-width: 2.5; fill: none; }
+    .a-g     { stroke: #7a828c; stroke-width: 2; fill: none; }
+    .m-u     { fill: #2f6fb0; }
+    .m-c     { fill: #2f8f5b; }
+    .m-r     { fill: #8b6bb1; }
+    .m-o     { fill: #b8891f; }
+    .m-g     { fill: #7a828c; }
+
+    @media (prefers-color-scheme: dark) {
+      .bg      { fill: #0f1115; }
+      .title   { fill: #e9ecf1; }
+      .sub     { fill: #99a2ae; }
+      .scope   { fill: #e9ecf1; }
+      .boxlbl  { fill: #e9ecf1; }
+      .dim     { fill: #99a2ae; }
+      .mono    { fill: #e9ecf1; }
+      .good    { fill: #57c98b; }
+      .warn    { fill: #ff8168; }
+      .warntxt { fill: #ff8168; }
+      .lbl-u   { fill: #5a9bd8; }
+      .lbl-c   { fill: #57c98b; }
+      .lbl-r   { fill: #b99be0; }
+      .lbl-o   { fill: #e0b54a; }
+      .halo    { stroke: #0f1115; }
+
+      .tenant  { fill: #12151a; stroke: #46536a; }
+      .subscr  { fill: #161a21; stroke: #5a6d8c; }
+      .mine    { fill: #121722; stroke: #5a9bd8; }
+      .managed { fill: #121722; stroke: #ff8168; }
+      .res     { fill: #1b2230; stroke: #46536a; }
+      .later   { fill: #1b2230; stroke: #46536a; }
+      .gotcha  { fill: #2a1613; stroke: #ff8168; }
+      .nicchip { fill: #261f10; stroke: #e0b54a; }
+      .incl    { fill: #1a1622; stroke: #a98bd0; }
+
+      .card-u  { fill: #121c2a; stroke: #5a9bd8; }
+      .card-i  { fill: #1a1d22; stroke: #99a2ae; }
+      .card-c  { fill: #12201a; stroke: #4fb37c; }
+      .card-r  { fill: #1a1622; stroke: #a98bd0; }
+      .box-c   { fill: #12201a; stroke: #4fb37c; }
+      .box-o   { fill: #261f10; stroke: #e0b54a; }
+
+      .a-u     { stroke: #5a9bd8; }
+      .a-c     { stroke: #4fb37c; }
+      .a-r     { stroke: #a98bd0; }
+      .a-o     { stroke: #e0b54a; }
+      .a-g     { stroke: #99a2ae; }
+      .m-u     { fill: #5a9bd8; }
+      .m-c     { fill: #4fb37c; }
+      .m-r     { fill: #a98bd0; }
+      .m-o     { fill: #e0b54a; }
+      .m-g     { fill: #99a2ae; }
+    }
+  </style>
+
+  <defs>
+    <marker id="mu" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="m-u" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="mc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="m-c" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="mr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="m-r" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="mo" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="m-o" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="mg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="m-g" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1320" height="1270"/>
+
+  <text class="title" x="20" y="38">Who can touch what: an ARO classic cluster in the QE tenant</text>
+  <text class="sub" x="20" y="60">Identities live in the tenant. Resources live in resource groups inside a subscription. Arrows are role assignments; colour follows the identity.</text>
+
+  <!-- ============================================================ -->
+  <!-- Tenant                                                        -->
+  <!-- ============================================================ -->
+  <rect class="tenant" x="20" y="80" width="1280" height="870" rx="10"/>
+  <text class="scope" x="36" y="104">Tenant: Microsoft Entra ID (formerly Azure Active Directory, AAD)</text>
+  <text class="dim" x="36" y="121">The directory of identities. None of the four below lives in a resource group, so deleting a group never removes one.</text>
+
+  <!-- You -->
+  <rect class="card-u" x="40" y="132" width="298" height="168" rx="8"/>
+  <text class="boxlbl" x="54" y="156">You</text>
+  <text class="mono" x="54" y="177">your Red Hat login</text>
+  <text class="dim" x="54" y="199">A user in the tenant.</text>
+  <text class="dim" x="54" y="217">Owner on the subscription (per ARO.md).</text>
+  <text class="dim" x="54" y="239">az aro create runs as you: it registers</text>
+  <text class="dim" x="54" y="257">the cluster principal and assigns its</text>
+  <text class="dim" x="54" y="275">roles, so you need the rights for both.</text>
+
+  <!-- CI profile principal -->
+  <rect class="card-i" x="354" y="132" width="298" height="168" rx="8"/>
+  <text class="boxlbl" x="368" y="156">CI cluster profile principal</text>
+  <text class="mono" x="368" y="177">osServicePrincipal.json</text>
+  <text class="dim" x="368" y="199">A service principal.</text>
+  <text class="dim" x="368" y="217">What CI jobs log in as, and what the</text>
+  <text class="dim" x="368" y="235">e2e suite's NIC client resolved to</text>
+  <text class="dim" x="368" y="253">before #152.</text>
+  <text class="warn" x="368" y="279">Denied in the managed group.</text>
+
+  <!-- Cluster principal -->
+  <rect class="card-c" x="668" y="132" width="298" height="168" rx="8"/>
+  <text class="boxlbl" x="682" y="156">Cluster principal</text>
+  <text class="mono" x="682" y="177">aro-amcdermo-&lt;ts&gt;</text>
+  <text class="dim" x="682" y="199">An application (client id + secret) and</text>
+  <text class="dim" x="682" y="217">its service principal, both registered</text>
+  <text class="dim" x="682" y="235">by az aro create.</text>
+  <text class="good" x="682" y="257">The only identity the deny exempts.</text>
+  <text class="warntxt" x="682" y="279">Outlives az aro delete: remove it yourself.</text>
+
+  <!-- ARO RP -->
+  <rect class="card-r" x="982" y="132" width="298" height="168" rx="8"/>
+  <text class="boxlbl" x="996" y="156">ARO resource provider</text>
+  <text class="mono" x="996" y="177">Microsoft first-party SP</text>
+  <text class="dim" x="996" y="199">Microsoft's own service principal, one</text>
+  <text class="dim" x="996" y="217">per tenant rather than one per cluster.</text>
+  <text class="dim" x="996" y="235">Builds and operates the managed group.</text>
+  <text class="dim" x="996" y="257">az aro create also gives it Network</text>
+  <text class="dim" x="996" y="275">Contributor on your vnet.</text>
+
+  <!-- ============================================================ -->
+  <!-- Subscription                                                  -->
+  <!-- ============================================================ -->
+  <rect class="subscr" x="40" y="380" width="1240" height="550" rx="10"/>
+  <text class="scope" x="56" y="404">Subscription "OpenShift QE"</text>
+
+  <!-- Your resource group -->
+  <rect class="mine" x="60" y="420" width="560" height="490" rx="8"/>
+  <text class="boxlbl" x="76" y="445">Resource group amcdermo-&lt;ts&gt;</text>
+  <text class="dim" x="76" y="463">Yours. aro-create-cluster makes it; az group delete removes it.</text>
+
+  <rect class="res" x="76" y="478" width="528" height="58" rx="6"/>
+  <text class="mono" x="90" y="501">openShiftClusters/amcdermo-&lt;ts&gt;</text>
+  <text class="dim" x="90" y="522">The cluster as an Azure resource. It points at the managed group.</text>
+
+  <rect class="res" x="76" y="552" width="528" height="222" rx="6"/>
+  <text class="mono" x="90" y="575">amcdermo-&lt;ts&gt;-vnet  10.0.0.0/17</text>
+  <rect class="mine" x="92" y="590" width="496" height="40" rx="5"/>
+  <text class="mono" x="106" y="615">master-subnet      10.0.0.0/23</text>
+  <rect class="mine" x="92" y="640" width="496" height="40" rx="5"/>
+  <text class="mono" x="106" y="665">worker-subnet      10.0.2.0/23</text>
+  <rect class="later" x="92" y="690" width="496" height="40" rx="5"/>
+  <text class="mono" x="106" y="715">RouteServerSubnet  10.0.4.0/27</text>
+  <text class="dim" x="92" y="757">The NICs sit in these subnets but live in the managed group.</text>
+
+  <rect class="later" x="76" y="790" width="528" height="100" rx="6"/>
+  <text class="boxlbl" x="90" y="814">Route Server + public IP</text>
+  <text class="dim" x="90" y="835">Added later by the estate step. Bills hourly, and</text>
+  <text class="dim" x="90" y="853">az aro delete does not know it exists.</text>
+  <text class="dim" x="90" y="875">Dashed: not made by aro-create-cluster.</text>
+
+  <!-- Managed resource group -->
+  <rect class="managed" x="640" y="420" width="620" height="490" rx="8"/>
+  <text class="boxlbl" x="656" y="445">Resource group aro-amcdermo-&lt;ts&gt;</text>
+  <text class="dim" x="656" y="463">ARO's. Created by the resource provider; the name is fixed by aro-create-cluster.</text>
+
+  <rect class="gotcha" x="656" y="476" width="588" height="72" rx="6"/>
+  <text class="warn" x="670" y="497">Deny assignment: */write, */delete, */action, for everyone except:</text>
+  <text class="good" x="670" y="517">exempt: the cluster principal</text>
+  <text class="warntxt" x="670" y="537">denied: you (Owner does not help), the CI profile principal</text>
+
+  <rect class="res" x="656" y="562" width="286" height="66" rx="6"/>
+  <text class="boxlbl" x="670" y="586">3 master VMs</text>
+  <text class="mono" x="670" y="608">Standard_D8s_v5</text>
+  <rect class="res" x="958" y="562" width="286" height="66" rx="6"/>
+  <text class="boxlbl" x="972" y="586">3 worker VMs</text>
+  <text class="mono" x="972" y="608">Standard_D4s_v5</text>
+
+  <rect class="res" x="656" y="642" width="588" height="76" rx="6"/>
+  <text class="boxlbl" x="670" y="665">Load balancers and their backend address pools</text>
+  <text class="dim" x="670" y="685">Every NIC is joined to a pool. Writing a NIC is also a request to</text>
+  <text class="dim" x="670" y="703">join its pool: .../backendAddressPools/join/action, the linked scope.</text>
+
+  <rect class="res" x="656" y="732" width="588" height="164" rx="6"/>
+  <text class="boxlbl" x="670" y="755">NICs, one per VM</text>
+  <rect class="nicchip" x="672" y="767" width="556" height="46" rx="5"/>
+  <text class="mono" x="686" y="787">worker NIC: enableIPForwarding = true</text>
+  <text class="dim" x="686" y="805">The write the operator makes on each router node.</text>
+  <text class="warn" x="670" y="838">Open question: does the cluster principal hold join/action</text>
+  <text class="warn" x="670" y="856">on the pools? The deny does not stop it; the role is unobserved.</text>
+  <text class="dim" x="670" y="880">A CI principal writing here got LinkedAuthorizationFailed.</text>
+
+  <!-- ============================================================ -->
+  <!-- Role assignments                                              -->
+  <!-- ============================================================ -->
+
+  <!-- You: Owner on the subscription -->
+  <path class="a-u" d="M190,300 V378" marker-end="url(#mu)"/>
+  <text class="lbl-u halo" x="200" y="336">Owner</text>
+  <text class="lbl-u halo" x="200" y="352">(inherited by both groups)</text>
+
+  <!-- Cluster principal: Network Contributor over your group -->
+  <path class="a-c" d="M700,300 V316 H580 V418" marker-end="url(#mc)"/>
+  <text class="lbl-c halo" x="570" y="334" text-anchor="end">Network Contributor: on the vnet</text>
+  <text class="lbl-c halo" x="570" y="350" text-anchor="end">(az aro create), and on the whole</text>
+  <text class="lbl-c halo" x="570" y="366" text-anchor="end">group (grant-network-role)</text>
+
+  <!-- Cluster principal: into the managed group -->
+  <path class="a-c" d="M820,300 V418" marker-end="url(#mc)"/>
+  <text class="lbl-c halo" x="830" y="334">Contributor, per CI's</text>
+  <text class="lbl-c halo" x="830" y="350">grant-network-role notes</text>
+
+  <!-- RP: operates the managed group -->
+  <path class="a-r" d="M1130,300 V418" marker-end="url(#mr)"/>
+  <text class="lbl-r halo" x="1140" y="342">builds and</text>
+  <text class="lbl-r halo" x="1140" y="358">operates it</text>
+
+  <!-- ============================================================ -->
+  <!-- Inside the cluster                                            -->
+  <!-- ============================================================ -->
+  <rect class="incl" x="20" y="1000" width="1280" height="190" rx="10"/>
+  <text class="scope" x="36" y="1024">Inside the cluster: OpenShift, running on the VMs above</text>
+
+  <rect class="box-c" x="40" y="1040" width="320" height="120" rx="8"/>
+  <text class="mono" x="54" y="1066">kube-system/azure-credentials</text>
+  <text class="dim" x="54" y="1090">The cluster principal's client id and</text>
+  <text class="dim" x="54" y="1108">secret, put there at install.</text>
+  <text class="good" x="54" y="1134">Same identity as the green card.</text>
+
+  <path class="a-g" d="M362,1100 H466" marker-end="url(#mg)"/>
+  <text class="dim" x="368" y="1088">CCO passthrough</text>
+  <text class="dim" x="368" y="1122">copies verbatim</text>
+
+  <rect class="box-c" x="470" y="1040" width="340" height="120" rx="8"/>
+  <text class="boxlbl" x="484" y="1064">One Secret per component</text>
+  <text class="mono" x="484" y="1088">openshift-*/cloud-credentials</text>
+  <text class="dim" x="484" y="1110">machine API, ingress, image registry,</text>
+  <text class="dim" x="484" y="1128">and the operator's own. All of them</text>
+  <text class="dim" x="484" y="1146">authenticate as the cluster principal.</text>
+
+  <path class="a-g" d="M812,1100 H896" marker-end="url(#mg)"/>
+
+  <rect class="box-o" x="900" y="1040" width="380" height="120" rx="8"/>
+  <text class="boxlbl" x="914" y="1064">bgp-cloud-connector operator</text>
+  <text class="dim" x="914" y="1086">Acts as the cluster principal, so it gets</text>
+  <text class="dim" x="914" y="1104">exactly what the green arrows grant:</text>
+  <text class="dim" x="914" y="1126">the NIC write needs the managed group,</text>
+  <text class="dim" x="914" y="1144">the Route Server needs your group.</text>
+
+  <!-- Operator to the NIC -->
+  <path class="a-o" d="M1100,1038 V900" marker-end="url(#mo)"/>
+  <text class="lbl-o halo" x="1110" y="976">IP forwarding on NICs</text>
+
+  <!-- Operator to the Route Server -->
+  <path class="a-o" d="M960,1038 V975 H340 V894" marker-end="url(#mo)"/>
+  <text class="lbl-o halo" x="420" y="970">discover and peer the Route Server</text>
+
+  <text class="dim" x="20" y="1220">Sources: the az 2.88 aro module (what az aro create registers and which roles it assigns), openshift/release#85681 grant-network-role, ARO.md.</text>
+  <text class="dim" x="20" y="1240">Not checked directly: your Owner role (from ARO.md) and the cluster principal's Contributor on the managed group (from the CI step's comment).</text>
+</svg>
