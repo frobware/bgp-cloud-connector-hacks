@@ -235,8 +235,12 @@ else
 
     list_remaining "instance" gcloud compute instances list \
         --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    # The mint-mode accounts' emails are truncated to 30 characters
+    # (amcdermo-260-openshift-g-rnq74@...), so only the two node
+    # accounts match on email. The display name keeps the full infra id.
     list_remaining "service account" gcloud iam service-accounts list \
-        --project "$GCP_PROJECT" --filter "email ~ ^${infra}-" --format 'value(email)'
+        --project "$GCP_PROJECT" \
+        --filter "email ~ ^${infra}- OR displayName ~ ^${infra}-" --format 'value(email)'
     list_remaining "firewall rule" gcloud compute firewall-rules list \
         --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
     list_remaining "forwarding rule" gcloud compute forwarding-rules list \
