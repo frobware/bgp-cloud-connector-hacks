@@ -1,0 +1,585 @@
+#!/usr/bin/env bash
+#
+# Build an ARO HCP (hosted control planes) cluster, checking things
+# first.
+#
+#   aro-hcp-create-cluster --dry-run
+#   aro-hcp-create-cluster
+#
+# There is no az command for this. The resource is
+# Microsoft.RedHatOpenShift/hcpOpenShiftClusters, reachable only
+# through the preview API, and everything here drives it with az rest.
+# The specification is Azure/ARO-HCP's demo/deploy-hcp-bicep.sh and its
+# Bicep templates, translated to az commands because deploying Bicep
+# would pull in the bicep binary; the request bodies were checked
+# against that repository's 2026-09-01-preview examples.
+#
+# Unlike classic ARO, the cluster brings almost nothing of its own. You
+# provide:
+#
+#   - a vnet with two subnets: one for the nodes, behind an NSG, and one
+#     delegated to the service for its API server integration.
+#   - a Key Vault holding the key etcd is encrypted with. From
+#     2026-06-30-preview customer-managed encryption is mandatory.
+#   - thirteen user-assigned managed identities: nine for control-plane
+#     operators, three for data-plane operators and one service managed
+#     identity that manages the rest. Each gets the ARO built-in role
+#     the demo gives it, on the resource the demo gives it.
+#
+# The resource provider then builds the node VMs in a managed resource
+# group, aro-<cluster>, and runs the control plane somewhere you never
+# see. There is no CCO and no kube-system/azure-credentials in the
+# guest: operators authenticate through workload identity federation.
+#
+# All of the above lives in the cluster's own resource group, so
+# teardown is: delete the cluster, delete that group, purge the Key
+# Vault from soft delete. aro-hcp-destroy-cluster does all three.
+#
+# Environment:
+#
+#   CLUSTER_USER     default $USER
+#   CLUSTER          cluster directory, default clusters/<YYMMDDHHMM>-aro-hcp-OCP-<X.Y>
+#   ARO_HCP_VERSION  X.Y; default the latest minor with a version enabled
+#                    in the region. The service picks the z-stream.
+#   AZURE_REGION     default uksouth; must be one the service offers
+
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+source "$here/azure-lib.bash"
+
+parse_args_only_common "$@"
+require_azure
+
+api=2026-09-01-preview
+keyvault_api=2025-05-01
+
+short_name="$(date +%y%m%d%H%M)"
+cluster_user="${CLUSTER_USER:-${USER:-$(whoami)}}"
+cluster_name="$cluster_user-$short_name"
+resource_group="$cluster_name"
+managed_resource_group="aro-$cluster_name"
+vnet="$cluster_name-vnet"
+nsg="$cluster_name-nsg"
+node_subnet=nodes
+integration_subnet="vnet-integration"
+key_vault="kv-$cluster_name"
+etcd_key=etcd-data-kms-encryption-key
+node_pool=np-1
+node_vm_size=Standard_D8s_v3
+node_vm_cpus=8
+node_replicas=2
+region="${AZURE_REGION:-uksouth}"
+subscription="$(azure_active_subscription)"
+
+sub_id="/subscriptions/$subscription"
+rg_id="$sub_id/resourceGroups/$resource_group"
+cluster_id="$rg_id/providers/Microsoft.RedHatOpenShift/hcpOpenShiftClusters/$cluster_name"
+node_pool_id="$cluster_id/nodePools/$node_pool"
+
+# Versions are per region, and a version can be listed but disabled.
+# The cluster takes only X.Y: the API calls it the desired minor, and
+# the service chooses the z-stream, which ARM never reports back. The
+# node pool takes X.Y.Z, so it is resolved later, from the control
+# plane's own clusterversion, rather than guessed here; picking the
+# region's latest put the nodes a z-stream ahead of the control plane.
+enabled_versions() {
+    az rest --method GET \
+        --url "https://management.azure.com$sub_id/providers/Microsoft.RedHatOpenShift/locations/$region/hcpOpenShiftVersions?api-version=$api" \
+        --query "value[?properties.enabled].name" -o tsv
+}
+
+resolve_cluster_version() {
+    local want="${ARO_HCP_VERSION:-}" latest
+    latest="$(enabled_versions | { [ -z "$want" ] && cat || grep -F "$want."; } | sort -V | tail -1)" || return 1
+    [ -n "$latest" ] || return 1
+    cluster_version="${latest%.*}"
+}
+
+[ -z "${ARO_HCP_VERSION:-}" ] || [[ "$ARO_HCP_VERSION" =~ ^[0-9]+\.[0-9]+$ ]] \
+    || die "ARO_HCP_VERSION must be X.Y, not $ARO_HCP_VERSION" \
+        "The service chooses the control plane's z-stream; the nodes follow it."
+
+node_pool_version=""
+cluster_version=""
+resolve_cluster_version || die "no enabled ARO HCP version ${ARO_HCP_VERSION:+matching $ARO_HCP_VERSION }in $region" \
+    "Enabled there:" \
+    "$(enabled_versions 2>&1 | sort -V | tr '\n' ' ')"
+
+cluster_dir="${CLUSTER:-$here/clusters/$short_name-aro-hcp-OCP-$cluster_version}"
+
+# ---------------------------------------------------------------------
+# The identities and their grants, straight from the demo's cluster.bicep.
+# ---------------------------------------------------------------------
+
+cp_operators=(cluster-api-azure control-plane cloud-controller-manager ingress
+              disk-csi-driver file-csi-driver image-registry cloud-network-config kms)
+dp_operators=(disk-csi-driver file-csi-driver image-registry)
+
+# identity  role definition  scope. Keys are cp:<operator>, dp:<operator>
+# and smi; scopes are vnet, subnet, nsg or keyvault. The service managed
+# identity's Reader on each cp identity and Federated Credential on each
+# dp identity are added in a loop below rather than listed.
+grants="
+cp:cluster-api-azure        88366f10-ed47-4cc0-9fab-c8a06148393e subnet
+cp:kms                      12338af0-0e69-4776-bea7-57ae8d297424 keyvault
+cp:control-plane            fc0c873f-45e9-4d0d-a7d1-585aab30c6ed vnet
+cp:control-plane            fc0c873f-45e9-4d0d-a7d1-585aab30c6ed nsg
+cp:cloud-controller-manager a1f96423-95ce-4224-ab27-4e3dc72facd4 subnet
+cp:cloud-controller-manager a1f96423-95ce-4224-ab27-4e3dc72facd4 nsg
+cp:ingress                  0336e1d3-7a87-462b-b6db-342b63f7802c subnet
+cp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e subnet
+cp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e nsg
+cp:cloud-network-config     be7a6435-15ae-4171-8f30-4a343eff9e8f subnet
+cp:cloud-network-config     be7a6435-15ae-4171-8f30-4a343eff9e8f vnet
+dp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e subnet
+dp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e nsg
+smi                         c0ff367d-66d8-445e-917c-583feb0ef0d4 vnet
+smi                         c0ff367d-66d8-445e-917c-583feb0ef0d4 nsg
+"
+reader_role=acdd72a7-3385-48ef-bd42-f606fba81ae7
+federated_credential_role=ef318e2a-8334-4a05-9e4a-295a196c6a6e
+
+identity_name() {
+    case "$1" in
+        smi)  printf '%s-service-managed-identity' "$cluster_name" ;;
+        cp:*) printf '%s-cp-%s' "$cluster_name" "${1#cp:}" ;;
+        dp:*) printf '%s-dp-%s' "$cluster_name" "${1#dp:}" ;;
+    esac
+}
+
+declare -A identity_id=() identity_principal=()
+
+# ---------------------------------------------------------------------
+# Predicates
+# ---------------------------------------------------------------------
+
+provider_registered() {
+    local state
+    state="$(az provider show -n Microsoft.RedHatOpenShift --query registrationState -o tsv)" || return 1
+    [ "$state" = "Registered" ]
+}
+
+region_offered() {
+    az provider show -n Microsoft.RedHatOpenShift -o json \
+        | jq -e --arg r "$region" '.resourceTypes[]
+            | select(.resourceType | ascii_downcase == "hcpopenshiftclusters")
+            | .locations[] | ascii_downcase | gsub(" "; "") | select(. == $r)' >/dev/null
+}
+
+dsv3_quota_free() {
+    local free
+    free="$(az vm list-usage -l "$region" -o json \
+        | jq -r '.[] | select(.name.value == "standardDSv3Family") | (.limit | tonumber) - (.currentValue | tonumber)')" || return 1
+    [ -n "$free" ] && [ "$free" -ge $((node_replicas * node_vm_cpus)) ] && return 0
+    printf 'DSv3 vCPUs free in %s: %s, need %s\n' "$region" "${free:-unknown}" $((node_replicas * node_vm_cpus)) >&2
+    return 1
+}
+
+resource_group_free() {
+    local out
+    out="$(az group exists --name "$1")" || return 1
+    [ "$out" = "false" ]
+}
+
+key_vault_name_free() {
+    local out
+    out="$(az keyvault check-name --name "$1" --query nameAvailable -o tsv)" || return 1
+    [ "$out" = "true" ]
+}
+
+key_vault_name_valid() { [ ${#1} -le 24 ]; }
+
+cluster_dir_free() { [ ! -e "$1/cluster-facts" ]; }
+
+dir_is_empty() {
+    [ ! -d "$1" ] || [ -z "$(ls -A "$1" 2>/dev/null)" ]
+}
+
+name_is_rfc1035() { printf '%s' "$1" | grep -qE '^[a-z]([-a-z0-9]*[a-z0-9])?$'; }
+
+# ---------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------
+
+facts_file() { printf '%s' "$cluster_dir/cluster-facts"; }
+
+# Written before anything exists; aro-hcp-destroy-cluster reads it.
+write_cluster_facts() {
+    mkdir -p "$cluster_dir"
+    cat > "$(facts_file)" <<EOF
+# Written by aro-hcp-create-cluster. Survives teardown on purpose.
+cloud=aro-hcp
+cluster_name=$cluster_name
+resource_group=$resource_group
+managed_resource_group=$managed_resource_group
+key_vault=$key_vault
+node_pool=$node_pool
+subscription=$subscription
+region=$region
+api_version=$api
+cluster_version=$cluster_version
+cluster_dir=$cluster_dir
+EOF
+    info "  wrote $(facts_file)"
+}
+
+write_cluster_envrc() {
+    mkdir -p "$cluster_dir"
+    cat > "$cluster_dir/.envrc" <<'EOF'
+# Written by aro-hcp-create-cluster. Keeps the repo's flake shell, then
+# points oc at this cluster.
+source_up_if_exists
+export KUBECONFIG="$PWD/auth/kubeconfig"
+EOF
+    if command -v direnv >/dev/null 2>&1 && direnv allow "$cluster_dir" 2>/dev/null; then
+        info "  wrote and allowed $cluster_dir/.envrc"
+    else
+        info "  wrote $cluster_dir/.envrc (run direnv allow yourself)"
+    fi
+}
+
+create_resource_group() {
+    az group create --name "$resource_group" --location "$region" --output none
+}
+
+# Addresses are the demo's. The node subnet leaves 10.0.2.0 onwards free
+# for a RouteServerSubnet later.
+create_network() {
+    az network nsg create -g "$resource_group" -n "$nsg" --output none &&
+    az network vnet create -g "$resource_group" -n "$vnet" \
+        --address-prefixes 10.0.0.0/16 --output none &&
+    az network vnet subnet create -g "$resource_group" --vnet-name "$vnet" \
+        -n "$node_subnet" --address-prefixes 10.0.0.0/24 --nsg "$nsg" \
+        --private-endpoint-network-policies Disabled --output none &&
+    az network vnet subnet create -g "$resource_group" --vnet-name "$vnet" \
+        -n "$integration_subnet" --address-prefixes 10.0.1.0/24 \
+        --delegations Microsoft.RedHatOpenShift/hcpOpenShiftClusters --output none
+}
+
+# A public vault, where the demo defaults to a private one with its own
+# private endpoint and DNS zone; the cluster body says which. The key is
+# created through ARM rather than the vault's data plane, as the demo's
+# Bicep does, so no data-plane role is needed to make it.
+etcd_key_version=""
+create_key_vault() {
+    az keyvault create -g "$resource_group" -n "$key_vault" -l "$region" \
+        --enable-rbac-authorization true --public-network-access Enabled \
+        --retention-days 7 --output none || return 1
+    local uri
+    uri="$(az rest --method PUT \
+        --url "https://management.azure.com$rg_id/providers/Microsoft.KeyVault/vaults/$key_vault/keys/$etcd_key?api-version=$keyvault_api" \
+        --body '{"properties":{"kty":"RSA","keySize":2048}}' \
+        --query properties.keyUriWithVersion -o tsv)" || return 1
+    etcd_key_version="${uri##*/}"
+    [ -n "$etcd_key_version" ] || { warn "  no key version in $uri"; return 1; }
+    info "  $key_vault/$etcd_key version $etcd_key_version"
+}
+
+create_identities() {
+    local key out
+    for key in smi $(printf 'cp:%s ' "${cp_operators[@]}") $(printf 'dp:%s ' "${dp_operators[@]}"); do
+        out="$(az identity create -g "$resource_group" -n "$(identity_name "$key")" -l "$region" \
+            --query '[id, principalId]' -o tsv)" || return 1
+        identity_id[$key]="$(sed -n 1p <<<"$out")"
+        identity_principal[$key]="$(sed -n 2p <<<"$out")"
+    done
+    info "  created ${#identity_id[@]} identities"
+}
+
+scope_id() {
+    case "$1" in
+        vnet)     printf '%s/providers/Microsoft.Network/virtualNetworks/%s' "$rg_id" "$vnet" ;;
+        subnet)   printf '%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s' "$rg_id" "$vnet" "$node_subnet" ;;
+        nsg)      printf '%s/providers/Microsoft.Network/networkSecurityGroups/%s' "$rg_id" "$nsg" ;;
+        keyvault) printf '%s/providers/Microsoft.KeyVault/vaults/%s' "$rg_id" "$key_vault" ;;
+        cp:*|dp:*) printf '%s' "${identity_id[$1]}" ;;
+    esac
+}
+
+# A freshly created identity can take a while to replicate, and a grant
+# to it fails with PrincipalNotFound until it has; retried, not slept.
+grant() {
+    local who="$1" role="$2" scope="$3"
+    retry 6 20 az role assignment create \
+        --assignee-object-id "${identity_principal[$who]}" \
+        --assignee-principal-type ServicePrincipal \
+        --role "$role" --scope "$(scope_id "$scope")" --output none
+}
+
+assign_roles() {
+    local who role scope n=0 key
+    while read -r who role scope; do
+        [ -n "$who" ] || continue
+        grant "$who" "$role" "$scope" || return 1
+        n=$((n + 1))
+    done <<<"$grants"
+    for key in "${cp_operators[@]}"; do
+        grant smi "$reader_role" "cp:$key" || return 1
+        n=$((n + 1))
+    done
+    for key in "${dp_operators[@]}"; do
+        grant smi "$federated_credential_role" "dp:$key" || return 1
+        n=$((n + 1))
+    done
+    info "  $n role assignments"
+}
+
+cluster_body() {
+    local cp dp all
+    cp="$(for k in "${cp_operators[@]}"; do printf '%s\n%s\n' "$k" "${identity_id[cp:$k]}"; done \
+        | jq -Rn '[inputs] | [range(0; length; 2) as $i | {(.[$i]): .[$i+1]}] | add')"
+    dp="$(for k in "${dp_operators[@]}"; do printf '%s\n%s\n' "$k" "${identity_id[dp:$k]}"; done \
+        | jq -Rn '[inputs] | [range(0; length; 2) as $i | {(.[$i]): .[$i+1]}] | add')"
+    all="$(for k in smi $(printf 'cp:%s ' "${cp_operators[@]}"); do printf '%s\n' "${identity_id[$k]}"; done \
+        | jq -Rn '[inputs] | map({(.): {}}) | add')"
+    jq -n \
+        --arg location "$region" \
+        --arg version "$cluster_version" \
+        --arg managed "$managed_resource_group" \
+        --arg subnet "$(scope_id subnet)" \
+        --arg integration "$(scope_id vnet)/subnets/$integration_subnet" \
+        --arg nsg "$(scope_id nsg)" \
+        --arg vault "$key_vault" \
+        --arg key "$etcd_key" \
+        --arg keyver "$etcd_key_version" \
+        --arg smi "${identity_id[smi]}" \
+        --argjson cp "$cp" --argjson dp "$dp" --argjson all "$all" '{
+      location: $location,
+      identity: {type: "UserAssigned", userAssignedIdentities: $all},
+      properties: {
+        version: {id: $version, channelGroup: "stable"},
+        dns: {},
+        console: {},
+        api: {visibility: "Public"},
+        clusterImageRegistry: {state: "Enabled"},
+        network: {networkType: "OVNKubernetes", podCidr: "10.128.0.0/14",
+                  serviceCidr: "172.30.0.0/16", machineCidr: "10.0.0.0/16", hostPrefix: 23},
+        etcd: {dataEncryption: {keyManagementMode: "CustomerManaged", customerManaged: {
+          encryptionType: "KMS",
+          kms: {vaultName: $vault, visibility: "Public", activeKey: {name: $key, version: $keyver}}}}},
+        platform: {
+          managedResourceGroup: $managed,
+          subnetId: $subnet,
+          vnetIntegrationSubnetId: $integration,
+          networkSecurityGroupId: $nsg,
+          outboundType: "LoadBalancer",
+          operatorsAuthentication: {userAssignedIdentities: {
+            controlPlaneOperators: $cp, dataPlaneOperators: $dp, serviceManagedIdentity: $smi}}}}}'
+}
+
+node_pool_body() {
+    jq -n --arg location "$region" --arg version "$node_pool_version" \
+        --arg subnet "$(scope_id subnet)" --arg size "$node_vm_size" \
+        --argjson replicas "$node_replicas" '{
+      location: $location,
+      properties: {
+        version: {id: $version, channelGroup: "stable"},
+        replicas: $replicas,
+        platform: {subnetId: $subnet, vmSize: $size,
+                   osDisk: {sizeGiB: 64, diskStorageAccountType: "StandardSSD_LRS"}}}}'
+}
+
+# Prints the provisioning state; a terminal failure is reported and
+# ends the wait rather than running out the clock.
+provisioned() {
+    local state
+    state="$(az rest --method GET --url "https://management.azure.com$1?api-version=$api" \
+        --query properties.provisioningState -o tsv 2>/dev/null)" || state=""
+    case "$state" in
+        Succeeded) info "  $state"; return 0 ;;
+        Failed|Canceled)
+            warn "  $state:"
+            explain "$(az rest --method GET --url "https://management.azure.com$1?api-version=$api" 2>&1 | head -40)"
+            exit_wait=true; return 0 ;;
+        *) info "  ${state:-no state yet}"; return 1 ;;
+    esac
+}
+
+exit_wait=false
+put_and_wait() {
+    local id="$1" body="$2" timeout="$3" what="$4"
+    printf '%s' "$body" > "$cluster_dir/$what.json"
+    az rest --method PUT --url "https://management.azure.com$id?api-version=$api" \
+        --body "@$cluster_dir/$what.json" --output none || return 1
+    exit_wait=false
+    wait_until "$timeout" 30 "the $what to provision" provisioned "$id" || return 1
+    [ "$exit_wait" = false ]
+}
+
+create_cluster()   { put_and_wait "$cluster_id" "$(cluster_body)" 3600 cluster; }
+create_node_pool() { put_and_wait "$node_pool_id" "$(node_pool_body)" 1800 node-pool; }
+
+# Polls an asynchronous operation's Location; 200 means the result is in
+# the named file.
+credential_ready() {
+    local code
+    code="$(curl -sS -o "$3" -w '%{http_code}' -H "Authorization: Bearer $2" "$1")" || return 1
+    [ "$code" = 200 ]
+}
+
+# The service signs a certificate for a key that never leaves here. The
+# CSR is mandatory whatever the API spec's optional marker says, and its
+# subject must be exactly this; both are enforced in ARO-HCP's frontend
+# (validateCSRSubject). The certificate is temporary: its expiry is
+# recorded beside it. Ask again with a new CSR when it runs out.
+#
+# The action is asynchronous: it answers 202 with a Location to poll,
+# and the kubeconfig is in the body that Location eventually returns.
+# az resource invoke-action does not follow it and prints {}, and az
+# rest cannot show the header, hence curl. The kubeconfig comes back
+# with the signed certificate and without the key, which is added here.
+fetch_credentials() {
+    local auth="$cluster_dir/auth" url token hdr loc code user
+    mkdir -p "$auth"
+    ( umask 077
+      openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-384 -nodes \
+          -keyout "$auth/admin.key" -out "$auth/admin.csr" \
+          -subj "/O=system:masters/CN=system:customer-break-glass:system-admin" ) || return 1
+    url="https://management.azure.com$cluster_id/requestAdminCredential?api-version=$api"
+    token="$(az account get-access-token --resource https://management.azure.com/ \
+        --query accessToken -o tsv)" || return 1
+    hdr="$auth/request.headers"
+    code="$(jq -n --rawfile csr "$auth/admin.csr" '{certificateSigningRequest: $csr}' \
+        | curl -sS -o "$auth/request.body" -D "$hdr" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+            --data @- "$url")" || return 1
+    if [ "$code" != 202 ]; then
+        warn "  requestAdminCredential answered $code:"
+        explain "$(cat "$auth/request.body")"
+        return 1
+    fi
+    loc="$(awk 'tolower($1) == "location:" { print $2 }' "$hdr" | tr -d '\r')"
+    ( umask 077
+      wait_until 300 5 "the admin credential" credential_ready "$loc" "$token" "$auth/credential.json" ) || return 1
+    ( umask 077; jq -er '.kubeconfig' "$auth/credential.json" > "$auth/kubeconfig" ) || return 1
+    jq -r '.expirationTimestamp' "$auth/credential.json" > "$auth/kubeconfig-expires"
+    rm -f "$auth/credential.json" "$auth/request.body" "$hdr"
+    if ! grep -q 'client-key-data' "$auth/kubeconfig"; then
+        user="$(KUBECONFIG="$auth/kubeconfig" oc config view -o jsonpath='{.users[0].name}')"
+        KUBECONFIG="$auth/kubeconfig" oc config set-credentials "$user" \
+            --client-key="$auth/admin.key" --embed-certs=true >/dev/null || return 1
+    fi
+    info "  wrote $auth/kubeconfig, expires $(cat "$auth/kubeconfig-expires")"
+}
+
+cluster_oc() { KUBECONFIG="$cluster_dir/auth/kubeconfig" oc "$@"; }
+
+# The z-stream the service chose, read from the guest because ARM only
+# echoes back the X.Y it was given. Waited for rather than assumed, as
+# nothing has shown it readable before any node exists.
+control_plane_version() {
+    local v
+    v="$(cluster_oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null)" || return 1
+    [ -n "$v" ] || return 1
+    node_pool_version="$v"
+}
+
+match_control_plane_version() {
+    wait_until 600 15 "the control plane to report its version" control_plane_version || return 1
+    enabled_versions | grep -qxF "$node_pool_version" || {
+        warn "  control plane runs $node_pool_version, which $region does not list as enabled"
+        return 1
+    }
+    printf 'node_pool_version=%s\n' "$node_pool_version" >> "$(facts_file)"
+    info "  control plane $node_pool_version; the node pool will match"
+}
+
+# Conditions, never columns; see CLAUDE.md.
+operators_unavailable() {
+    cluster_oc get co -o json 2>/dev/null \
+        | jq -r '[.items[] | select(([(.status.conditions // [])[]
+            | select(.type=="Available") | .status] | first) != "True")
+            | .metadata.name] | join(" ")'
+}
+
+all_operators_available() {
+    local bad total
+    bad="$(operators_unavailable)"
+    total="$(cluster_oc get co -o json 2>/dev/null | jq -r '.items | length')"
+    [ -n "$total" ] && [ "$total" -gt 0 ] || return 1
+    if [ -z "$bad" ]; then
+        info "  $total/$total operators Available"
+        return 0
+    fi
+    info "  waiting on: $bad"
+    return 1
+}
+
+verify_cluster() {
+    wait_until 1800 30 "every cluster operator to become Available" \
+        all_operators_available \
+        || fail "some operators never became Available, see above"
+    return 0
+}
+
+# ---------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------
+
+info "Cluster:        $cluster_name ($cluster_version, $region)"
+info "Resource group: $resource_group"
+info "Managed group:  $managed_resource_group"
+info "Key Vault:      $key_vault"
+info "Subscription:   $subscription"
+info "Directory:      $cluster_dir"
+info ""
+
+info "--- preflight ---"
+check "oc on PATH"                            command -v oc
+check "jq on PATH"                            command -v jq
+check "Microsoft.RedHatOpenShift registered"  provider_registered
+check "ARO HCP offered in $region"            region_offered
+check "$((node_replicas * node_vm_cpus)) DSv3 vCPUs free in $region" dsv3_quota_free
+check "cluster directory unused"              cluster_dir_free "$cluster_dir"
+check "cluster directory is empty"            dir_is_empty "$cluster_dir"
+check "name is RFC 1035 valid"                name_is_rfc1035 "$cluster_name"
+check "Key Vault name within 24 chars"        key_vault_name_valid "$key_vault"
+check "Key Vault name $key_vault available"   key_vault_name_free "$key_vault"
+check "no resource group $resource_group"     resource_group_free "$resource_group"
+check "no resource group $managed_resource_group" resource_group_free "$managed_resource_group"
+abort_if_failed
+info ""
+
+if [ "$dry_run" = true ]; then
+    info "Would create $cluster_name in $region (subscription $subscription)."
+    report
+    exit $?
+fi
+
+cleanup_guidance=false
+on_exit() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ "$cleanup_guidance" = true ]; then
+        warn ""
+        warn "Failed partway through. To clean up whatever exists:"
+        warn "  CLUSTER=$cluster_dir aro-hcp-destroy-cluster"
+    fi
+}
+trap on_exit EXIT
+
+cleanup_guidance=true
+
+step  "cluster .envrc"       write_cluster_envrc
+step  "cluster facts"        write_cluster_facts
+step  "resource group"       create_resource_group
+step  "network"              create_network
+step  "key vault"            create_key_vault
+step  "identities"           create_identities
+step  "role assignments"     assign_roles
+step  "create cluster"       create_cluster
+step  "fetch credentials"    fetch_credentials
+step  "control-plane version" match_control_plane_version
+step  "node pool"            create_node_pool
+phase "verify operators"     verify_cluster
+
+cleanup_guidance=false
+
+info ""
+info "Cluster:    $cluster_name"
+info "Kubeconfig: $cluster_dir/auth/kubeconfig"
+info "            export KUBECONFIG=$cluster_dir/auth/kubeconfig"
+info ""
+info "Tear it down with:"
+info "  CLUSTER=$cluster_dir aro-hcp-destroy-cluster"
+report

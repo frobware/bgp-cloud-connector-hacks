@@ -46,6 +46,8 @@
 !azure-list-route-server
 !aro-create-cluster
 !aro-destroy-cluster
+!aro-hcp-create-cluster
+!aro-hcp-destroy-cluster
 !gcp-create-cloud-router
 !gcp-delete-cloud-router
 !gcp-list-cloud-router
