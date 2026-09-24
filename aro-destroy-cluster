@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+#
+# Tear down a cluster built by aro-create-cluster.
+#
+#   CLUSTER=$PWD/clusters/2609241127-aro-OCP-4.21.22 aro-destroy-cluster --dry-run
+#   CLUSTER=$PWD/clusters/2609241127-aro-OCP-4.21.22 aro-destroy-cluster
+#
+# Three things to remove, in this order:
+#
+#   1. the cluster, with az aro delete. The resource provider removes the
+#      managed group, aro-<cluster>, which nobody else may touch.
+#   2. the cluster's resource group, with the vnet and anything added
+#      there since -- a Route Server and its public IP, for instance.
+#   3. the AAD application az aro create registered. Neither of the
+#      above removes it, and its client secret lives as long as it does.
+#
+# The order matters. Deleting the group first would pull the vnet out
+# from under a cluster the resource provider still runs, and deleting
+# the application first would leave that cluster unable to authenticate
+# while it is being torn down.
+#
+# The cluster is treated as gone only when az says ResourceNotFound or
+# ResourceGroupNotFound. Any other failure to look -- an expired login,
+# a DNS failure -- is not evidence of absence, and deleting the group on
+# the strength of it would strand the managed group behind a deny
+# assignment you cannot remove.
+#
+# Every name comes from cluster-facts, which aro-create-cluster writes
+# before anything exists, so even a create that died in its first
+# minute leaves enough to clean up after. The recorded subscription is
+# passed to every call rather than trusting whichever one az is on.
+#
+# Every phase runs even if an earlier one failed, except that the group
+# and application wait for the cluster to be gone; failures are
+# collected and reported at the end. The directory stays.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/azure-lib.bash"
+
+parse_args_only_common "$@"
+require_cmd jq
+require_azure
+
+[ -n "${CLUSTER:-}" ] || die "CLUSTER is not set" \
+    "Point it at the cluster directory:" \
+    "  CLUSTER=\$PWD/clusters/<YYMMDDHHMM>-aro-OCP-<version> ${0##*/}"
+
+facts="$CLUSTER/cluster-facts"
+[ -f "$facts" ] || die "no cluster-facts in $CLUSTER"
+
+read_fact() {
+    awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1"
+}
+
+cloud="$(read_fact "$facts" cloud)"
+[ "$cloud" = "aro" ] || die "this cluster directory belongs to ${cloud:-an unknown cloud}" \
+    "Use ${cloud:-the matching}-destroy-cluster instead."
+
+cluster_name="$(read_fact "$facts" cluster_name)"
+resource_group="$(read_fact "$facts" resource_group)"
+managed_resource_group="$(read_fact "$facts" managed_resource_group)"
+subscription="$(read_fact "$facts" subscription)"
+client_id="$(read_fact "$facts" client_id)"
+
+for k in cluster_name resource_group managed_resource_group subscription; do
+    [ -n "${!k}" ] || die "cluster-facts has no $k" "It is written by aro-create-cluster; is $facts one of its?"
+done
+
+if [ "$subscription" != "$(azure_active_subscription)" ]; then
+    warn "az is on $(azure_active_subscription); the cluster was built in $subscription, using that"
+fi
+
+sub=(--subscription "$subscription")
+
+# Prints present or absent, or fails having said why it could not tell.
+cluster_state() {
+    local out
+    if capture out az aro show "${sub[@]}" -g "$resource_group" -n "$cluster_name" --output none; then
+        echo present
+    elif grep -qE '^Code: (ResourceNotFound|ResourceGroupNotFound)$' <<<"$out"; then
+        echo absent
+    else
+        warn "  could not tell whether the cluster exists:"
+        explain "$out"
+        return 1
+    fi
+}
+
+group_exists() {
+    local out
+    out="$(az group exists "${sub[@]}" --name "$1")" || return 1
+    [ "$out" = "true" ]
+}
+
+# The recorded client id when there is one; otherwise every application
+# carrying the managed group's name, which is what az aro create called
+# it. A create that died after registering the application but before
+# recording it leaves only the name.
+app_ids() {
+    if [ -n "$client_id" ]; then
+        printf '%s\n' "$client_id"
+        return 0
+    fi
+    az ad app list --display-name "$managed_resource_group" --query '[].appId' -o tsv
+}
+
+info "Subscription:   $subscription"
+info "Cluster:        $cluster_name"
+info "Resource group: $resource_group"
+info "Managed group:  $managed_resource_group"
+info "Application:    ${client_id:-<not recorded; looked up by name $managed_resource_group>}"
+info ""
+
+cluster_gone=false
+
+delete_cluster() {
+    local state
+    state="$(cluster_state)" || return 1
+    if [ "$state" = "absent" ]; then
+        info "  no cluster resource"
+        cluster_gone=true
+        return 0
+    fi
+    try az aro delete "${sub[@]}" --yes -g "$resource_group" -n "$cluster_name" || return 1
+    cluster_gone=true
+}
+
+delete_group() {
+    if [ "$cluster_gone" != true ]; then
+        warn "  the cluster may still exist; not deleting the group beneath it"
+        return 1
+    fi
+    if ! group_exists "$resource_group"; then
+        info "  no resource group $resource_group"
+        return 0
+    fi
+    try az group delete "${sub[@]}" --yes --name "$resource_group"
+}
+
+delete_application() {
+    if [ "$cluster_gone" != true ]; then
+        warn "  the cluster may still exist; not deleting the principal it runs as"
+        return 1
+    fi
+    local ids id status=0
+    ids="$(app_ids)" || return 1
+    if [ -z "$ids" ]; then
+        info "  no application"
+        return 0
+    fi
+    while IFS= read -r id; do
+        try az ad app delete --id "$id" || status=1
+    done <<<"$ids"
+    return "$status"
+}
+
+# Look rather than trust: after a clean run every line here is absent.
+# A lookup that fails is a failure, never an empty answer.
+audit() {
+    if [ "$dry_run" = true ]; then
+        info "  (skipped: nothing was deleted)"
+        return 0
+    fi
+    local left=false state ids
+    state="$(cluster_state)" || return 1
+    [ "$state" = "absent" ] || { warn "  cluster     $cluster_name"; left=true; }
+    for g in "$resource_group" "$managed_resource_group"; do
+        if group_exists "$g"; then
+            warn "  group       $g"
+            left=true
+        fi
+    done
+    ids="$(az ad app list --display-name "$managed_resource_group" --query '[].appId' -o tsv)" || return 1
+    if [ -n "$client_id" ]; then
+        ids="$ids"$'\n'"$(az ad app list --app-id "$client_id" --query '[].appId' -o tsv)" || return 1
+    fi
+    ids="$(grep . <<<"$ids" | sort -u | tr '\n' ' ')" || true
+    [ -z "$ids" ] || { warn "  application $ids"; left=true; }
+    [ "$left" = false ] || return 1
+    info "  nothing"
+}
+
+phase "cluster"          delete_cluster
+phase "resource group"   delete_group
+phase "AAD application"  delete_application
+phase "remaining"        audit
+
+info "Cloud resources only. This directory is untouched:"
+info "  $CLUSTER"
+report
