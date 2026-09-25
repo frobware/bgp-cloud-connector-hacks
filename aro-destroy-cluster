@@ -13,6 +13,8 @@
 #      there since -- a Route Server and its public IP, for instance.
 #   3. the AAD application az aro create registered. Neither of the
 #      above removes it, and its client secret lives as long as it does.
+#      A cluster built with ARO_IDENTITY=managed has none; its
+#      identities live in the cluster's resource group and go with it.
 #
 # The order matters. Deleting the group first would pull the vnet out
 # from under a cluster the resource provider still runs, and deleting

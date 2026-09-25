@@ -31,6 +31,17 @@
 # operator needs it to find and peer the Route Server, which lives in
 # that group rather than the managed one.
 #
+# ARO_IDENTITY=managed builds the other kind of classic cluster: no
+# service principal, no AAD application, and operators that
+# authenticate through workload identity. It needs nine user-assigned
+# identities -- one for the cluster, one per platform operator -- and
+# twenty role assignments that az aro create makes for a service
+# principal but not for these. Both are made here, in the cluster's
+# resource group, following Microsoft's "Create an ARO cluster with
+# managed identities" instructions. There is no
+# kube-system/azure-credentials on such a cluster, so the network grant
+# above is skipped: an operator that needs Azure brings its own identity.
+#
 # Retrying means running it again, as with the other create scripts: a
 # new name, a new directory, nothing leaking between attempts.
 #
@@ -42,6 +53,7 @@
 #                  latest version az aro get-versions offers the region
 #   AZURE_REGION   default centralus
 #   PULL_SECRET    default ~/.secrets/pull-secret.json
+#   ARO_IDENTITY   service-principal (default) or managed
 
 set -euo pipefail
 
@@ -49,6 +61,12 @@ here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 source "$here/azure-lib.bash"
 
 parse_args_only_common "$@"
+
+identity_mode="${ARO_IDENTITY:-service-principal}"
+case "$identity_mode" in
+    service-principal|managed) ;;
+    *) die "ARO_IDENTITY must be service-principal or managed, not $identity_mode" ;;
+esac
 
 # The version lookup below needs a working login, so this comes before
 # anything else rather than as a preflight line.
@@ -89,6 +107,37 @@ ocp_version="$(resolve_aro_version || true)"
 cluster_dir="${CLUSTER:-$here/clusters/$short_name-aro-OCP-$ocp_version}"
 
 # ---------------------------------------------------------------------
+# Managed identities, from Microsoft's instructions for az. The
+# resource provider publishes the operators and their roles per minor
+# version, but not the scopes, so the table is here and the preflight
+# checks it names the same operators the provider does.
+# ---------------------------------------------------------------------
+
+platform_operators=(aro-operator cloud-controller-manager cloud-network-config
+                    disk-csi-driver file-csi-driver image-registry ingress machine-api)
+
+# operator  role definition  scope, where subnets means both.
+# disk-csi-driver has a role in the set but no network grant.
+platform_grants="
+cloud-controller-manager a1f96423-95ce-4224-ab27-4e3dc72facd4 subnets
+ingress                  0336e1d3-7a87-462b-b6db-342b63f7802c subnets
+machine-api              0358943c-7e01-48ba-8889-02cc51d78637 subnets
+aro-operator             4436bae4-7702-4c84-919b-c4069ff25ee2 subnets
+cloud-network-config     be7a6435-15ae-4171-8f30-4a343eff9e8f vnet
+file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e vnet
+image-registry           8b32b316-c2f5-4ddf-b05b-83dacd2d08b5 vnet
+"
+federated_credential_role=ef318e2a-8334-4a05-9e4a-295a196c6a6e
+# Azure Red Hat OpenShift First Party Network, for the resource
+# provider's own principal, over the vnet.
+first_party_network_role=42f3c60f-e7b1-46d7-ba56-6de681664342
+rp_app_id=f1dd0a37-89c6-4e07-bcd1-ffd3d43d8875
+
+identity_name() { printf '%s-%s' "$cluster_name" "$1"; }
+
+declare -A identity_id=() identity_principal=()
+
+# ---------------------------------------------------------------------
 # Predicates
 # ---------------------------------------------------------------------
 
@@ -116,6 +165,26 @@ aad_app_free() {
     [ -z "$out" ] && return 0
     printf 'already registered: %s\n' "$out" >&2
     return 1
+}
+
+# The provider's list for this minor version against the table above.
+# A new operator would otherwise surface as a create that fails forty
+# minutes in, or not at all.
+role_set_matches() {
+    local want got
+    want="$(printf '%s\n' "${platform_operators[@]}" | sort)"
+    got="$(az rest --method GET \
+        --url "https://management.azure.com/subscriptions/$subscription/providers/Microsoft.RedHatOpenShift/locations/$region/platformWorkloadIdentityRoleSets/${ocp_version%.*}?api-version=2025-07-25" \
+        --query 'properties.platformWorkloadIdentityRoles[].operatorName' -o tsv | sort)" || return 1
+    [ "$want" = "$got" ] && return 0
+    printf 'the provider lists: %s\n' "$(tr '\n' ' ' <<<"$got")" >&2
+    return 1
+}
+
+rp_principal_visible() {
+    local id
+    id="$(az ad sp show --id "$rp_app_id" --query id -o tsv)" || return 1
+    [ -n "$id" ]
 }
 
 cluster_dir_free() { [ ! -e "$1/cluster-facts" ]; }
@@ -147,6 +216,7 @@ managed_resource_group=$managed_resource_group
 subscription=$subscription
 region=$region
 ocp_version=$ocp_version
+identity=$identity_mode
 cluster_dir=$cluster_dir
 EOF
     info "  wrote $(facts_file)"
@@ -192,18 +262,76 @@ create_vnet() {
         --output none
 }
 
+create_identities() {
+    local key out
+    for key in cluster "${platform_operators[@]}"; do
+        out="$(az identity create -g "$resource_group" -n "$(identity_name "$key")" -l "$region" \
+            --query '[id, principalId]' -o tsv)" || return 1
+        identity_id[$key]="$(sed -n 1p <<<"$out")"
+        identity_principal[$key]="$(sed -n 2p <<<"$out")"
+    done
+    info "  created ${#identity_id[@]} identities"
+}
+
+vnet_scope() {
+    printf '/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s' \
+        "$subscription" "$resource_group" "$vnet"
+}
+
+# A freshly created identity can take a while to replicate, and a grant
+# to it fails with PrincipalNotFound until it has; retried, not slept.
+grant_to() {
+    retry 6 20 az role assignment create --assignee-object-id "$1" \
+        --assignee-principal-type ServicePrincipal \
+        --role "$2" --scope "$3" --output none
+}
+
+assign_identity_roles() {
+    local op role scope n=0 rp
+    for op in "${platform_operators[@]}"; do
+        grant_to "${identity_principal[cluster]}" "$federated_credential_role" "${identity_id[$op]}" || return 1
+        n=$((n + 1))
+    done
+    while read -r op role scope; do
+        [ -n "$op" ] || continue
+        if [ "$scope" = subnets ]; then
+            grant_to "${identity_principal[$op]}" "$role" "$(vnet_scope)/subnets/master-subnet" || return 1
+            grant_to "${identity_principal[$op]}" "$role" "$(vnet_scope)/subnets/worker-subnet" || return 1
+            n=$((n + 2))
+        else
+            grant_to "${identity_principal[$op]}" "$role" "$(vnet_scope)" || return 1
+            n=$((n + 1))
+        fi
+    done <<<"$platform_grants"
+    rp="$(az ad sp show --id "$rp_app_id" --query id -o tsv)" || return 1
+    grant_to "$rp" "$first_party_network_role" "$(vnet_scope)" || return 1
+    n=$((n + 1))
+    info "  $n role assignments"
+}
+
+identity_args() {
+    [ "$identity_mode" = managed ] || return 0
+    local op
+    printf '%s\n' --enable-managed-identity --assign-cluster-identity "${identity_id[cluster]}"
+    for op in "${platform_operators[@]}"; do
+        printf '%s\n' --assign-platform-workload-identity "$op" "${identity_id[$op]}"
+    done
+}
+
 create_cluster() {
-    local status=0
+    local status=0 args
+    mapfile -t args < <(identity_args)
     az aro create -g "$resource_group" -n "$cluster_name" \
         --location "$region" --version "$ocp_version" \
         --vnet "$vnet" --master-subnet master-subnet --worker-subnet worker-subnet \
         --cluster-resource-group "$managed_resource_group" \
         --pull-secret "$pull_secret" \
+        "${args[@]}" \
         --output json > "$cluster_dir/aro-cluster.json" || status=$?
     # Here as well as in the phase below, which a failed create never
     # reaches: a create that dies after registering the application is
     # exactly when teardown needs its id.
-    record_cluster_principal || true
+    [ "$identity_mode" = managed ] || record_cluster_principal || true
     return "$status"
 }
 
@@ -326,6 +454,7 @@ verify_cluster() {
 info "Cluster:        $cluster_name ($ocp_version, $region)"
 info "Resource group: $resource_group"
 info "Managed group:  $managed_resource_group"
+info "Identity:       $identity_mode"
 info "Subscription:   $subscription"
 info "Directory:      $cluster_dir"
 info ""
@@ -341,8 +470,13 @@ check "name is RFC 1035 valid"             name_is_rfc1035 "$cluster_name"
 check "no resource group $resource_group"  resource_group_free "$resource_group"
 check "no resource group $managed_resource_group" \
     resource_group_free "$managed_resource_group"
-check "no AAD application $managed_resource_group" \
-    aad_app_free "$managed_resource_group"
+if [ "$identity_mode" = managed ]; then
+    check "provider's operators match the identity table" role_set_matches
+    check "resource provider principal visible" rp_principal_visible
+else
+    check "no AAD application $managed_resource_group" \
+        aad_app_free "$managed_resource_group"
+fi
 abort_if_failed
 info ""
 
@@ -362,8 +496,10 @@ on_exit() {
         warn "  az aro show -g $resource_group -n $cluster_name --output none &&"
         warn "    az aro delete --yes -g $resource_group -n $cluster_name"
         warn "  az group delete --yes --name $resource_group"
-        warn "  az ad app list --display-name $managed_resource_group --query '[].appId' -o tsv"
-        warn "    and az ad app delete --id <each>"
+        if [ "$identity_mode" != managed ]; then
+            warn "  az ad app list --display-name $managed_resource_group --query '[].appId' -o tsv"
+            warn "    and az ad app delete --id <each>"
+        fi
     fi
 }
 trap on_exit EXIT
@@ -374,13 +510,19 @@ step  "cluster .envrc"             write_cluster_envrc
 step  "cluster facts"              write_cluster_facts
 step  "resource group"             create_resource_group
 step  "vnet and subnets"           create_vnet
+if [ "$identity_mode" = managed ]; then
+    step  "managed identities"     create_identities
+    step  "role assignments"       assign_identity_roles
+fi
 step  "create cluster"             create_cluster
-phase "record cluster principal"   record_cluster_principal
+[ "$identity_mode" = managed ] ||
+    phase "record cluster principal" record_cluster_principal
 phase "check managed group"        check_managed_group
 step  "fetch credentials"          fetch_credentials
 # phase, not step: a cluster without the grant, or with a sulking
 # operator, is still a cluster you want to keep and look at.
-phase "grant network role"         grant_network_role
+[ "$identity_mode" = managed ] ||
+    phase "grant network role"     grant_network_role
 phase "verify operators"           verify_cluster
 
 cleanup_guidance=false
@@ -394,5 +536,6 @@ info ""
 info "Tear it down with:"
 info "  az aro delete --yes -g $resource_group -n $cluster_name"
 info "  az group delete --yes --name $resource_group"
-info "  az ad app delete --id \$(grep ^client_id= $(facts_file) | cut -d= -f2)"
+[ "$identity_mode" = managed ] ||
+    info "  az ad app delete --id \$(grep ^client_id= $(facts_file) | cut -d= -f2)"
 report
