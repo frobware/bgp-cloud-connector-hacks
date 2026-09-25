@@ -4,7 +4,8 @@ Scaffolding for developing bgp-cloud-connector against a real cloud,
 until the rosa-bgp Terraform is available and most of this can be
 deleted.
 
-Everything here is prefixed by cloud: `aws-`, `azure-` and `gcp-`.
+Everything here is prefixed by cloud: `aws-`, `azure-`, `gcp-`, and
+`aro-` and `aro-hcp-` for the two managed Azure offerings.
 `lib.bash` is shared and deliberately knows nothing about any
 particular cloud; `aws-lib.bash`, `azure-lib.bash` and `gcp-lib.bash`
 layer the cloud-specific helpers on top, and scripts source the lib
@@ -68,6 +69,10 @@ for an hour.
 | `azure-create-cluster` | Builds an Azure cluster. Same shape as the GCP one. |
 | `azure-create-install-config` | Writes an Azure install-config.yaml |
 | `azure-destroy-cluster` | Teardown, plus a check that destroy really took everything |
+| `aro-create-cluster` | Builds an ARO classic cluster with `az aro create`. No installer. |
+| `aro-destroy-cluster` | Teardown: the cluster, its resource group, and the AAD application `az aro delete` leaves behind |
+| `aro-hcp-create-cluster` | Builds an ARO HCP cluster through the preview API, with the vnet, Key Vault and identities it needs |
+| `aro-hcp-destroy-cluster` | Teardown: the cluster, its resource group, and a purge of the soft-deleted Key Vault |
 | `gcp-installer-credentials` | One-time: the service account and key `openshift-install` needs |
 | `gcp-create-cluster` | Builds a GCP cluster. Same shape as the AWS one, minus the credential dance. |
 | `gcp-create-install-config` | Writes a GCP install-config.yaml |
@@ -489,6 +494,113 @@ Differences worth knowing, next to GCP:
   operator, as on GCP. The Route Server and its public IP bill hourly
   but live in the cluster's resource group, so
   `azure-destroy-cluster` takes them, unlike the AWS endpoints.
+
+## ARO
+
+Azure Red Hat OpenShift, in both forms: classic, where the resource
+provider runs the whole cluster in your subscription, and HCP, where
+the control plane is hosted and only the nodes are yours. Neither uses
+`openshift-install`, so there is no install-config, no
+`metadata.json` and no infra id. `cluster-facts` is the only record,
+written before anything exists, and the destroy scripts work from it
+alone.
+
+Both authenticate as your `az login`; there is no service principal
+file to write. What that login needs:
+
+- Owner on the subscription, or Contributor plus User Access
+  Administrator. Both scripts create role assignments, and Contributor
+  alone fails partway through.
+- `Microsoft.RedHatOpenShift` registered in the subscription. Both
+  preflights check; `az provider register -n Microsoft.RedHatOpenShift
+  --wait` fixes it.
+- `oc`, `jq`, and for HCP `openssl` and `curl`, all in the devshell.
+
+```
+az login
+
+PULL_SECRET=$HOME/.secrets/pull-secret.json aro-create-cluster --dry-run
+PULL_SECRET=$HOME/.secrets/pull-secret.json aro-create-cluster
+PULL_SECRET=$HOME/.secrets/pull-secret.json ARO_IDENTITY=managed aro-create-cluster
+CLUSTER=clusters/<YYMMDDHHMM>-aro-OCP-<version> aro-destroy-cluster
+
+aro-hcp-create-cluster --dry-run
+aro-hcp-create-cluster
+CLUSTER=clusters/<YYMMDDHHMM>-aro-hcp-OCP-<X.Y> aro-hcp-destroy-cluster
+```
+
+The cluster directory has the same `auth/kubeconfig` and `.envrc` as
+the installer-built ones, so `cd` in and `oc` points at it.
+
+`aro-identities.svg` draws which identity holds which role over which
+resource group in a classic cluster.
+
+### Classic
+
+- `ARO_VERSION` takes X.Y.Z, or X.Y for its latest patch, and defaults
+  to the latest the region offers. `AZURE_REGION` defaults to
+  centralus.
+- A cluster spans two resource groups. `<cluster>` holds the cluster
+  resource and the vnet and is yours; `aro-<cluster>` holds the VMs and
+  carries a deny assignment, so nothing but the resource provider may
+  touch it.
+- `az aro create` registers an AAD application for the cluster and `az
+  aro delete` does not remove it. `aro-destroy-cluster` does, and it
+  finds the application by name even when the create died partway.
+- The last phase grants the cluster's principal Network Contributor
+  over `<cluster>`, which the operator needs to find and peer a Route
+  Server there. The grant can take minutes to become visible, and the
+  script waits for it.
+- The vnet leaves 10.0.4.0/27 free for a `RouteServerSubnet`.
+
+`ARO_IDENTITY=managed` builds the other kind of classic cluster, whose
+operators authenticate through workload identity instead of a service
+principal:
+
+- The script creates nine user-assigned identities in `<cluster>`, one
+  for the cluster and one per platform operator, and the twenty role
+  assignments Microsoft's instructions list. `az aro create` makes
+  these for a service principal but not for managed identities. The
+  preflight checks the operator list against the one the resource
+  provider publishes for the version.
+- There is no AAD application, no `kube-system/azure-credentials`, and
+  no Network Contributor grant: an operator that needs Azure brings its
+  own identity.
+- The deny assignment on `aro-<cluster>` lets through only the eight
+  platform identities and the resource provider.
+- Built once, on 4.21.22: `az aro create` took 66 minutes, against 50
+  for a service principal cluster the day before.
+
+### HCP
+
+`aro-hcp-create-cluster` has not yet been run end to end in its
+current form. The one run on record used an earlier version and failed
+fetching credentials, after the cluster and node pool had provisioned.
+
+- There is no `az` command for ARO HCP. Everything goes through `az
+  rest` against the preview API, so the script records the API version
+  in `cluster-facts` and teardown uses the same one.
+- The service creates almost nothing, so the script creates the rest:
+  a vnet with a node subnet and a delegated integration subnet, a Key
+  Vault holding the etcd encryption key (customer-managed encryption is
+  mandatory), and thirteen user-assigned managed identities with their
+  role assignments. All of it lives in `<cluster>`; the node VMs go in
+  `aro-<cluster>`.
+- `ARO_HCP_VERSION` takes X.Y only, defaulting to the latest enabled in
+  the region. The service picks the control plane's z-stream, and the
+  node pool is then created to match it. `AZURE_REGION` defaults to
+  uksouth, and the preflight checks that the region offers ARO HCP and
+  has enough DSv3 quota for the two nodes.
+- There is no CCO and no `kube-system/azure-credentials` in the guest.
+  Operators authenticate through workload identity federation.
+- The kubeconfig holds a break-glass certificate that expires.
+  `auth/kubeconfig-expires` says when. Nothing here renews it; after
+  that, request a new one with a fresh CSR.
+- The Key Vault name is `kv-<cluster>` and must fit in 24 characters,
+  which leaves `CLUSTER_USER` ten characters. The preflight checks.
+  Deleting the group only soft-deletes the vault, and the name stays
+  taken until it is purged, which `aro-hcp-destroy-cluster` does.
+- The vnet leaves 10.0.2.0 onwards free for a `RouteServerSubnet`.
 
 ## Why bash, mostly
 
