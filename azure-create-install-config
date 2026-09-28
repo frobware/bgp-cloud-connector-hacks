@@ -10,14 +10,21 @@
 # API outage, and during bootstrap teardown a two-member etcd is a
 # quorum deadlock waiting for either member to blink.
 #
-# No credentialsMode line, and on Azure that is not a choice so much as
-# the absence of one. The installer accepts Mint, Passthrough and Manual
-# only where the platform supports them, and Azure supports Passthrough
-# and Manual -- there is no Mint. Left empty, the installer checks what
-# the service principal can do and settles on Passthrough, which copies
-# the same credential into each component rather than minting narrower
-# ones. Manual is the workload-identity path with its own ccoctl dance,
-# and this script does not do it.
+# No credentialsMode line by default, and on Azure that is not a choice
+# so much as the absence of one. The installer accepts Mint, Passthrough
+# and Manual only where the platform supports them, and Azure supports
+# Passthrough and Manual -- there is no Mint. Left empty, the installer
+# checks what the service principal can do and settles on Passthrough,
+# which copies the same credential into each component rather than
+# minting narrower ones.
+#
+# AZURE_CREDENTIALS_MODE=Manual writes the workload-identity config
+# instead: credentialsMode: Manual, and resourceGroupName naming a group
+# called after the cluster. That group is not this script's to create.
+# ccoctl azure create-all creates it, empty, and scopes every component
+# identity to it, which is why the name is fixed rather than chosen:
+# azure-create-cluster runs ccoctl with --name set to the cluster name
+# and relies on ccoctl's default for the installation group.
 #
 # AZURE_BASE_DOMAIN is a constant here where the GCP script discovers
 # it, and the difference is that a shared subscription accumulates
@@ -32,6 +39,7 @@
 #   AZURE_BASE_DOMAIN       default qe.azure.devcluster.openshift.com
 #   AZURE_BASE_DOMAIN_RG    default: the group holding that zone
 #   AZURE_REGION            default centralus
+#   AZURE_CREDENTIALS_MODE  Passthrough (default) or Manual
 #   CONTROL_PLANE_REPLICAS  default 3
 #   WORKER_REPLICAS         default 3
 #   CONTROL_PLANE_TYPE      default Standard_D8s_v3
@@ -66,6 +74,13 @@ worker_type="${WORKER_TYPE:-Standard_D4s_v3}"
 ssh_key="${SSH_KEY:-$HOME/.ssh/id_ed25519.pub}"
 cluster_name="${CLUSTER_NAME:-${CLUSTER_USER:-${USER:-$(whoami)}}-$(date +%y%m%d%H%M)}"
 pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
+credentials_mode="${AZURE_CREDENTIALS_MODE:-Passthrough}"
+
+case "$credentials_mode" in
+    Passthrough|Manual) ;;
+    *) die "AZURE_CREDENTIALS_MODE is $credentials_mode" \
+        "Azure accepts Passthrough or Manual; there is no Mint." ;;
+esac
 
 base_domain_rg="${AZURE_BASE_DOMAIN_RG:-}"
 if [ -z "$base_domain_rg" ]; then
@@ -108,6 +123,7 @@ if [ "$dry_run" = true ]; then
     info "    region        $region"
     info "    control plane $control_plane_replicas x $control_plane_type"
     info "    workers       $worker_replicas x $worker_type"
+    info "    credentials   $credentials_mode"
     info "    sshKey        $ssh_key"
     info "    pullSecret    $pull_secret"
     info "    clusterName   $cluster_name"
@@ -115,13 +131,26 @@ if [ "$dry_run" = true ]; then
     exit $?
 fi
 
+# The two lines Manual adds, empty under Passthrough so the config is
+# byte-for-byte what it was before the mode existed.
+credentials_mode_line=""
+resource_group_line=""
+if [ "$credentials_mode" = Manual ]; then
+    credentials_mode_line="credentialsMode: Manual"
+    resource_group_line="    resourceGroupName: $cluster_name"
+fi
+
 # Written with a restrictive umask because the pull secret goes inside.
 old_umask="$(umask)"
 umask 077
-cat > "$out" <<EOF
+{
+cat <<EOF
 additionalTrustBundlePolicy: Proxyonly
 apiVersion: v1
 baseDomain: $base_domain
+EOF
+[ -z "$credentials_mode_line" ] || printf '%s\n' "$credentials_mode_line"
+cat <<EOF
 compute:
 - architecture: amd64
   hyperthreading: Enabled
@@ -156,15 +185,20 @@ platform:
     cloudName: AzurePublicCloud
     outboundType: Loadbalancer
     region: $region
+EOF
+[ -z "$resource_group_line" ] || printf '%s\n' "$resource_group_line"
+cat <<EOF
 publish: External
 sshKey: |
   $(cat "$ssh_key")
 pullSecret: '$(jq -c . "$pull_secret")'
 EOF
+} > "$out"
 umask "$old_umask"
 
 info "Wrote $out"
 info "  cluster name  $cluster_name"
+info "  credentials   $credentials_mode"
 info "  control plane $control_plane_replicas x $control_plane_type"
 info "  workers       $worker_replicas x $worker_type"
 info "  region        $region"
