@@ -241,9 +241,37 @@ else
     list_remaining "service account" gcloud iam service-accounts list \
         --project "$GCP_PROJECT" \
         --filter "email ~ ^${infra}- OR displayName ~ ^${infra}-" --format 'value(email)'
+    # The installer's own rules are named allow-<infra>-cluster and
+    # allow-<infra>-healthchecks.
     list_remaining "firewall rule" gcloud compute firewall-rules list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        --project "$GCP_PROJECT" \
+        --filter "name ~ ^${infra}- OR name ~ ^allow-${infra}-" --format 'value(name)'
     list_remaining "forwarding rule" gcloud compute forwarding-rules list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    # An install killed while waiting for network infrastructure leaves
+    # these behind with no instance or forwarding rule beside them. The
+    # Cloud NAT lives inside the router.
+    list_remaining "network" gcloud compute networks list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "subnet" gcloud compute networks subnets list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "router" gcloud compute routers list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "address" gcloud compute addresses list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "backend service" gcloud compute backend-services list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "health check" gcloud compute health-checks list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "instance group" gcloud compute instance-groups list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "target pool" gcloud compute target-pools list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "disk" gcloud compute disks list \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "image" gcloud compute images list --no-standard-images \
+        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+    list_remaining "dns zone" gcloud dns managed-zones list \
         --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
     # Fetch guarded, filter separately. A single 'gcloud | grep ||
     # true' pipeline forces status 0 whether gcloud failed or grep
