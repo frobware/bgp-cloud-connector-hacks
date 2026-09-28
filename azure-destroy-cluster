@@ -5,19 +5,25 @@
 #   CLUSTER=$PWD/clusters/2608131500-azure-OCP-4.22.8 azure-destroy-cluster --dry-run
 #   CLUSTER=$PWD/clusters/2608131500-azure-OCP-4.22.8 azure-destroy-cluster
 #
-# Shorter than its AWS sibling for the same reason the GCP one is. On
-# AWS, ccoctl creates IAM roles, an OIDC provider and an S3 bucket
-# before the installer ever runs, all keyed on the cluster name, and
-# openshift-install destroy never learns about them. Azure has no Mint
-# mode and nothing is created ahead of the install: the cluster is one
-# resource group named after the infra id, plus two record sets in the
-# base domain's zone, and destroy knows about all of it. What remains
-# here is the "remaining" check afterwards, because trusting that claim
-# without looking is how orphans happen.
-#
-# An install that died before "create cluster" created nothing in Azure,
-# so a directory with no metadata.json and no infra id means there is
+# A Passthrough cluster is shorter work than its AWS sibling, for the
+# same reason the GCP one is: nothing is created ahead of the install.
+# The cluster is one resource group named after the infra id, plus two
+# record sets in the base domain's zone, and destroy knows about all of
+# it. An install that died before "create cluster" created nothing, so
+# a directory with no metadata.json and no infra id means there is
 # genuinely nothing to delete.
+#
+# A Manual cluster is the AWS shape. ccoctl azure create-all made an
+# OIDC resource group holding a storage account and one managed identity
+# per component, custom roles at subscription scope, and the group the
+# cluster installed into, all keyed on the cluster name. openshift-install
+# destroy deletes the installation group, because metadata.json names
+# it, and knows nothing about the rest; ccoctl azure delete removes
+# those. They may exist without an infra id at all, when the install
+# died after ccoctl ran.
+#
+# Either way the "remaining" check afterwards stays, because trusting a
+# deletion's claim without looking is how orphans happen.
 #
 # Once the cluster directory is gone, name things instead:
 #
@@ -37,7 +43,7 @@
 # it yourself when you are finished.
 #
 # Overrides: AZURE_AUTH_LOCATION (default ~/.azure/osServicePrincipal.json),
-# OPENSHIFT_INSTALL (default: the cluster's own bin/, then PATH).
+# OPENSHIFT_INSTALL and CCOCTL (default: the cluster's own bin/, then PATH).
 
 set -euo pipefail
 
@@ -53,6 +59,11 @@ infra="${INFRA:-}"
 base_domain="${AZURE_BASE_DOMAIN:-}"
 base_domain_rg="${AZURE_BASE_DOMAIN_RG:-}"
 subscription=""
+credentials_mode=""
+region=""
+oidc_resource_group=""
+installation_resource_group=""
+storage_account=""
 
 # cluster-facts first, metadata.json second: the facts file survives a
 # destroy that dies partway, the installer's file does not. Parsed, not
@@ -68,8 +79,18 @@ if [ -f "$facts" ]; then
     [ -n "$base_domain" ] || base_domain="$(read_fact "$facts" base_domain)"
     [ -n "$base_domain_rg" ] || base_domain_rg="$(read_fact "$facts" base_domain_rg)"
     subscription="$(read_fact "$facts" subscription)"
+    credentials_mode="$(read_fact "$facts" credentials_mode)"
+    region="$(read_fact "$facts" region)"
+    oidc_resource_group="$(read_fact "$facts" oidc_resource_group)"
+    installation_resource_group="$(read_fact "$facts" installation_resource_group)"
+    storage_account="$(read_fact "$facts" storage_account)"
     [ -n "$cluster_name" ] && echo "Read identifiers from $facts"
 fi
+
+# Facts written before the mode existed carry no credentials_mode, and
+# every one of those clusters was Passthrough.
+manual=false
+[ "$credentials_mode" = Manual ] && manual=true
 
 if [ -z "$cluster_name" ] || [ -z "$infra" ] || [ -z "$subscription" ]; then
     metadata="${CLUSTER:-}/metadata.json"
@@ -161,10 +182,20 @@ else
     installer="openshift-install"
 fi
 
+if [ -n "${CCOCTL:-}" ]; then
+    ccoctl="$CCOCTL"
+elif [ -x "${CLUSTER:-}/bin/ccoctl" ]; then
+    ccoctl="$CLUSTER/bin/ccoctl"
+else
+    ccoctl="ccoctl"
+fi
+
 echo "Subscription: $subscription"
 echo "Cluster name: $cluster_name"
 echo "Infra id:     ${infra:-<none: the install never created the cluster>}"
+echo "Credentials:  ${credentials_mode:-Passthrough}"
 echo "Installer:    $installer"
+[ "$manual" = false ] || echo "ccoctl:       $ccoctl"
 echo
 
 # Keyed on the same predicate as the deletion phase below, or the banner
@@ -177,8 +208,19 @@ elif [ -n "$infra" ]; then
     echo "  nothing: without metadata.json there is nothing for the"
     echo "  installer to destroy from, so this run only audits what"
     echo "  survives for $infra"
-else
+elif [ "$manual" = false ]; then
     echo "  nothing: Azure creates nothing before the cluster itself"
+fi
+if [ "$manual" = true ]; then
+    echo "  ccoctl's resources for $cluster_name, via ccoctl azure delete:"
+    echo "    custom roles owned by $cluster_name, and their assignments"
+    echo "    the managed identities in $oidc_resource_group"
+    echo "    storage account $storage_account"
+    echo "    resource group $oidc_resource_group"
+    if [ -z "${CLUSTER:-}" ] || [ ! -f "${CLUSTER}/metadata.json" ]; then
+        echo "  resource group $installation_resource_group, if ccoctl left it"
+        echo "  with no cluster in it"
+    fi
 fi
 echo
 
@@ -198,7 +240,49 @@ else
 fi
 echo
 
-# Phase 2. Say what is actually left rather than trusting the above.
+# Phase 2, Manual only. After the cluster, because its components hold
+# tokens for these identities until their nodes are gone. As the
+# service principal, which is what created them: ccoctl deletes a custom
+# role by listing its assignments first, and the principal that made
+# them is the one certain to be allowed to. The OIDC group goes whole,
+# which takes the storage account and every identity with it; the
+# explicit flag names are there because ccoctl's own defaults for the
+# storage account would fail on our hyphenated name.
+if [ "$manual" = true ]; then
+    echo "--- workload identity ---"
+    if [ ! -f "$creds_file" ]; then
+        fail "no service principal at $creds_file, cannot run ccoctl"
+    elif [ -z "$region" ] || [ -z "$storage_account" ]; then
+        fail "cluster-facts has no region or storage account, cannot run ccoctl"
+    elif ! AZURE_CLIENT_ID="$(jq -r '.clientId // empty' "$creds_file")" \
+            AZURE_CLIENT_SECRET="$(jq -r '.clientSecret // empty' "$creds_file")" \
+            AZURE_TENANT_ID="$(jq -r '.tenantId // empty' "$creds_file")" \
+            try "$ccoctl" azure delete \
+                --name="$cluster_name" \
+                --region="$region" \
+                --subscription-id="$subscription" \
+                --storage-account-name="$storage_account" \
+                --oidc-resource-group-name="$oidc_resource_group" \
+                --delete-oidc-resource-group; then
+        fail "ccoctl azure delete"
+    fi
+
+    # ccoctl creates the installation group, empty, and its delete does
+    # not remove it; openshift-install destroy does, but only when
+    # metadata.json exists to name it. An install that died between the
+    # two leaves an empty group nothing else will take.
+    if [ -z "${CLUSTER:-}" ] || [ ! -f "${CLUSTER}/metadata.json" ]; then
+        if [ "$(az group exists --subscription "$subscription" \
+                --name "$installation_resource_group" 2>/dev/null)" = true ]; then
+            try az group delete --subscription "$subscription" \
+                --name "$installation_resource_group" --yes \
+                || fail "az group delete $installation_resource_group"
+        fi
+    fi
+    echo
+fi
+
+# Phase 3. Say what is actually left rather than trusting the above.
 # After a clean destroy every listing here comes back empty. Matching is
 # on the infra id, which itself starts "<name>-", so nothing here can
 # catch another cluster's resources: the timestamp in the name sees to
@@ -209,7 +293,7 @@ echo
 echo "--- remaining ---"
 if [ "$dry_run" = true ]; then
     echo "  (skipped: nothing was deleted)"
-elif [ -z "$infra" ]; then
+elif [ -z "$infra" ] && [ "$manual" = false ]; then
     echo "  no infra id, nothing was ever created"
 else
     remaining=""
@@ -228,8 +312,26 @@ else
         done <<< "$out"
     }
 
-    list_remaining "resource group" az group list --subscription "$subscription" \
-        --query "[?starts_with(name, '${infra}')].name" -o tsv
+    # Guarded, because an empty infra id makes this starts_with match
+    # every group in the subscription, and under Manual the audit runs
+    # without one whenever the install died after ccoctl.
+    if [ -n "$infra" ]; then
+        list_remaining "resource group" az group list --subscription "$subscription" \
+            --query "[?starts_with(name, '${infra}')].name" -o tsv
+    fi
+
+    # By exact name, not prefix: aim-260805 is a prefix of
+    # aim-2608051714, which is how a sweep once matched the wrong
+    # cluster. Custom roles are matched on the description ccoctl writes
+    # and deletes by, "Owned by: <name>", so this looks for exactly what
+    # ccoctl azure delete would have looked for.
+    if [ "$manual" = true ]; then
+        list_remaining "resource group" az group list --subscription "$subscription" \
+            --query "[?name=='${installation_resource_group}' || name=='${oidc_resource_group}'].name" -o tsv
+        list_remaining "custom role" az role definition list --subscription "$subscription" \
+            --custom-role-only true \
+            --query "[?description=='Custom role for OpenShift. Owned by: ${cluster_name}'].roleName" -o tsv
+    fi
 
     # Filtered in --query rather than grepped afterwards, for the reason
     # azure-create-cluster spells out: the unfiltered listing is 140KB
