@@ -445,12 +445,23 @@ on_exit() {
     local status=$?
     [ -n "$scratch" ] && rm -rf "$scratch"
     if [ "$status" -ne 0 ] && [ "$cleanup_guidance" = true ]; then
+        # create_cluster records it too, but a TERM never gets back
+        # there; see the trap below.
+        if [ -f "$cluster_dir/metadata.json" ]; then
+            record_infra_id || true
+        fi
         warn ""
         warn "Failed partway through. To clean up whatever exists:"
         warn "  CLUSTER=$cluster_dir azure-destroy-cluster"
     fi
 }
 trap on_exit EXIT
+# Without this, a TERM kills bash outright and on_exit never runs.
+# systemd stopping the unit sends TERM to the whole cgroup; trapped,
+# bash waits for the installer to finish shutting down, then exits
+# through on_exit, which records the infra id destroy needs once
+# metadata.json is gone.
+trap 'exit 143' TERM
 
 # Validate the config that will actually be installed; see
 # aws-create-cluster for why a generated stand-in goes to a scratch
