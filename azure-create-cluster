@@ -28,19 +28,33 @@
 # for a cluster it never looked at. So they are compared, and a
 # disagreement stops the run.
 #
+# AZURE_CREDENTIALS_MODE=Manual builds a workload-identity cluster
+# instead, which is aws-create-cluster's shape again: ccoctl comes out of
+# the payload, the CredentialsRequests are extracted, and ccoctl azure
+# create-all makes an OIDC issuer, one user-assigned managed identity per
+# component and the resource group the cluster installs into, all before
+# the installer runs. ccoctl runs as the installer's service principal,
+# not your az login: it creates custom roles and role assignments, which
+# the principal's User Access Administrator covers, and teardown then
+# deletes as the principal that created.
+#
 # Retrying means running it again. That produces a new name and a new
 # directory, so nothing from a failed attempt can leak into the next
 # one, and the failed attempt stays readable.
 #
 # Environment:
 #
+#   AZURE_CREDENTIALS_MODE  Passthrough (default) or Manual
+#   CCOCTL                default <cluster>/bin/ccoctl, extracted if absent
 #   CLUSTER_USER          default $USER
 #   CLUSTER               cluster directory, default clusters/<YYMMDDHHMM>-azure-OCP-<version>
 #   OPENSHIFT_INSTALL     default <cluster>/bin/openshift-install, fetched if absent
 #   OCP_CHANNEL           passed to get-openshift-install, default stable-4.22
 #   INSTALL_CONFIG        a config to copy in; the copy's metadata.name
 #                         is rewritten to the generated cluster name.
-#                         Default: generate one
+#                         Default: generate one. Passthrough only: under
+#                         Manual the config's resourceGroupName has to be
+#                         the group ccoctl creates, so it is generated
 #   PULL_SECRET           default ~/.secrets/pull-secret.json
 #   AZURE_AUTH_LOCATION   service principal for the installer,
 #                         default ~/.azure/osServicePrincipal.json
@@ -86,6 +100,26 @@ pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
 creds_file="$(azure_credentials_file)"
 
 installer="${OPENSHIFT_INSTALL:-$bin_dir/openshift-install}"
+ccoctl="${CCOCTL:-$bin_dir/ccoctl}"
+
+credentials_mode="${AZURE_CREDENTIALS_MODE:-Passthrough}"
+case "$credentials_mode" in
+    Passthrough|Manual) ;;
+    *) die "AZURE_CREDENTIALS_MODE is $credentials_mode" \
+        "Azure accepts Passthrough or Manual; there is no Mint." ;;
+esac
+
+# ccoctl names the OIDC group <name>-oidc and the installation group
+# <name> when not told otherwise, and those defaults are what the
+# generated install-config and teardown both assume.
+oidc_resource_group="$cluster_name-oidc"
+installation_resource_group="$cluster_name"
+
+# ccoctl's default storage account name is --name, which it then rejects:
+# an account name is 3 to 24 lowercase letters and digits, and ours has a
+# hyphen. The account is also named in public blob URLs, so the name is
+# global across Azure, not per subscription.
+storage_account="$(printf '%s' "$cluster_name" | tr -cd 'a-z0-9' | cut -c1-24)"
 
 # ---------------------------------------------------------------------
 # Predicates. Each answers one question and says nothing about what to
@@ -123,15 +157,38 @@ subscription_agrees() {
 
 config_is_yaml() { python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$1"; }
 
-# Passthrough is the point of this script, and on Azure it is also the
-# only alternative to Manual. A config carrying Manual would install
-# with no credential manifests at all, and that wedges bootstrap the
-# same way the AWS trap does -- Secrets that never arrive, retried
-# forever. The optional quote matters: YAML accepts Manual, "Manual" and
-# 'Manual' alike, and a pattern that only knows the bare spelling waves
-# the quoted ones through as though the field were absent.
-config_not_manual() {
-    ! grep -qE '^credentialsMode:[[:space:]]*['"'"'"]?Manual' "$1"
+# The config has to agree with the mode asked for, both ways round. A
+# config carrying Manual in a Passthrough run would install with no
+# credential manifests at all, and that wedges bootstrap the same way
+# the AWS trap does -- Secrets that never arrive, retried forever. A
+# config without it in a Manual run would install ccoctl's manifests
+# into a cluster that ignores them. The optional quote matters: YAML
+# accepts Manual, "Manual" and 'Manual' alike, and a pattern that only
+# knows the bare spelling waves the quoted ones through as though the
+# field were absent.
+config_is_manual() {
+    grep -qE '^credentialsMode:[[:space:]]*['"'"'"]?Manual' "$1"
+}
+
+config_mode_matches() {
+    if config_is_manual "$1"; then
+        [ "$credentials_mode" = Manual ]
+    else
+        [ "$credentials_mode" != Manual ]
+    fi
+}
+
+# ccoctl creates both groups and fails on neither existing, so a leftover
+# from an earlier cluster of the same name would be adopted silently:
+# its identities rescoped, its storage account reused.
+resource_group_free() {
+    [ "$(az group exists --name "$1")" = false ]
+}
+
+storage_account_name_valid() { printf '%s' "$1" | grep -qE '^[a-z0-9]{3,24}$'; }
+
+storage_account_name_available() {
+    [ "$(az storage account check-name --name "$1" --query nameAvailable -o tsv)" = true ]
 }
 
 config_has_pull_secret() { grep -q '^pullSecret:' "$1"; }
@@ -230,6 +287,44 @@ ensure_installer() {
     BIN_DIR="$bin_dir" "$here/get-openshift-install"
 }
 
+ccoctl_runnable() { [ -x "$1" ] && "$1" --help >/dev/null 2>&1; }
+
+# As in aws-create-cluster, including the reason -a is on every call and
+# the NixOS interpreter patch.
+ensure_ccoctl() {
+    local release_image
+    if ccoctl_runnable "$ccoctl"; then
+        info "  ccoctl already present and runnable"
+        return 0
+    fi
+
+    mkdir -p "$bin_dir"
+
+    if [ ! -f "$ccoctl" ]; then
+        release_image="$("$installer" version | awk '/release image/ {print $3}')"
+        local cco_image
+        cco_image="$(retry 3 10 oc adm release info \
+            --registry-config="$pull_secret" \
+            --image-for=cloud-credential-operator "$release_image")" || return 1
+        info "  extracting ccoctl from $cco_image"
+        ( cd "$bin_dir" && retry 3 10 oc image extract "$cco_image" \
+            --file=/usr/bin/ccoctl -a "$pull_secret" ) || return 1
+        chmod +x "$ccoctl"
+    fi
+
+    if ! ccoctl_runnable "$ccoctl"; then
+        command -v patchelf >/dev/null 2>&1 || {
+            warn "  ccoctl will not execute and patchelf is not available"
+            return 1
+        }
+        local interp
+        interp="$(patchelf --print-interpreter "$(readlink -f "$(command -v ls)")")"
+        info "  patching ccoctl interpreter to $interp"
+        patchelf --set-interpreter "$interp" --set-rpath "$(dirname "$interp")" "$ccoctl"
+        ccoctl_runnable "$ccoctl" || return 1
+    fi
+}
+
 config_matches_request() {
     local f="$1" want="$2" got
     got="$(config_name "$f")"
@@ -279,10 +374,13 @@ prepare_config() {
         rename_config "$cluster_dir/install-config.yaml"
     else
         CLUSTER_NAME="$cluster_name" PULL_SECRET="$pull_secret" \
+            AZURE_CREDENTIALS_MODE="$credentials_mode" \
             "$here/azure-create-install-config" "$cluster_dir/install-config.yaml"
     fi
     # create cluster consumes the original; the copy is the record of
-    # what was asked for, which the directory exists to keep.
+    # what was asked for, which the directory exists to keep, and under
+    # Manual the credential request extraction reads it to work out
+    # which capabilities this cluster enables.
     cp "$cluster_dir/install-config.yaml" "$cluster_dir/install-config.yaml.bak"
 }
 
@@ -306,7 +404,17 @@ base_domain=$base_domain
 base_domain_rg=$base_domain_rg
 ocp_version=${ocp_version:-unknown}
 cluster_dir=$cluster_dir
+credentials_mode=$credentials_mode
 EOF
+    # Written before ccoctl runs, so a create-all that dies halfway still
+    # leaves teardown the names of what it may have made.
+    if [ "$credentials_mode" = Manual ]; then
+        cat >> "$(facts_file)" <<EOF
+oidc_resource_group=$oidc_resource_group
+installation_resource_group=$installation_resource_group
+storage_account=$storage_account
+EOF
+    fi
     info "  wrote $(facts_file)"
 }
 
@@ -351,6 +459,104 @@ EOF
     else
         info "  wrote $cluster_dir/.envrc (no direnv; source it or export KUBECONFIG)"
     fi
+}
+
+create_manifests() {
+    if [ -d "$cluster_dir/manifests" ]; then
+        info "  manifests already generated"
+        return 0
+    fi
+    AZURE_AUTH_LOCATION="$creds_file" \
+        "$installer" create manifests --dir="$cluster_dir"
+}
+
+# --included filters on capabilities; see aws-create-cluster for why
+# that is not sufficient and the feature-gate drop below does the work.
+extract_credential_requests() {
+    if [ -d "$cluster_dir/credreqs" ] && [ -n "$(ls -A "$cluster_dir/credreqs" 2>/dev/null)" ]; then
+        info "  credential requests already extracted"
+        return 0
+    fi
+    local release_image
+    release_image="$("$installer" version | awk '/release image/ {print $3}')"
+    mkdir -p "$cluster_dir/credreqs"
+    retry 3 10 oc adm release extract --credentials-requests --included \
+        --install-config="$cluster_dir/install-config.yaml.bak" \
+        --registry-config="$pull_secret" \
+        --cloud=azure --to="$cluster_dir/credreqs" "$release_image"
+    drop_requests_for_disabled_capabilities
+    info "  $(find "$cluster_dir/credreqs" -type f | wc -l) credential request(s)"
+}
+
+# A request for a component the cluster will not run becomes a Secret in
+# a namespace that never exists, and bootstrap retries it forever. The
+# full account, and the reason dropped requests are parked rather than
+# deleted, is in aws-create-cluster.
+drop_requests_for_disabled_capabilities() {
+    local config="$cluster_dir/install-config.yaml.bak"
+    local feature_set
+    feature_set="$(awk '/^featureSet:/{print $2; exit}' "$config")"
+
+    if [ -n "$feature_set" ] && [ "$feature_set" != '""' ] && [ "$feature_set" != "Default" ]; then
+        info "  featureSet is $feature_set, keeping all requests"
+        return 0
+    fi
+
+    local f dropped=0
+    for f in "$cluster_dir"/credreqs/*; do
+        [ -f "$f" ] || continue
+        local gate
+        gate="$(awk -F': *' '/release\.openshift\.io\/feature-gate:/{print $2; exit}' "$f")"
+        [ -n "$gate" ] || continue
+        info "  dropping $(basename "$f"): gated by $gate, assumed not in the default feature set"
+        mkdir -p "$cluster_dir/credreqs-dropped"
+        mv "$f" "$cluster_dir/credreqs-dropped/"
+        dropped=$((dropped + 1))
+    done
+    if [ "$dropped" -eq 0 ]; then
+        info "  no feature-gated requests to drop"
+    else
+        info "  parked in credreqs-dropped/, in case a gate was promoted"
+    fi
+    return 0
+}
+
+# DefaultAzureCredential reads the service principal from these three
+# variables before it tries anything else, so ccoctl acts as the
+# installer's principal rather than whoever az is logged in as. The
+# secret stays out of the facts file and out of the log.
+#
+# --dnszone-resource-group-name, because the ingress operator's identity
+# is otherwise scoped to the installation group alone and cannot write
+# the *.apps record into the base domain's zone.
+run_ccoctl() {
+    if [ -d "$cluster_dir/ccoctl-output/manifests" ]; then
+        info "  ccoctl output already present"
+        return 0
+    fi
+    ( cd "$cluster_dir" && \
+        AZURE_CLIENT_ID="$(creds_field clientId)" \
+        AZURE_CLIENT_SECRET="$(creds_field clientSecret)" \
+        AZURE_TENANT_ID="$(creds_field tenantId)" \
+        "$ccoctl" azure create-all \
+            --name="$cluster_name" \
+            --region="$region" \
+            --subscription-id="$subscription" \
+            --tenant-id="$(creds_field tenantId)" \
+            --storage-account-name="$storage_account" \
+            --dnszone-resource-group-name="$base_domain_rg" \
+            --credentials-requests-dir=./credreqs \
+            --output-dir=./ccoctl-output )
+}
+
+# ccoctl's manifests carry the Secret per component, the Authentication
+# config naming the issuer, and azure-credentials in the CCO namespace,
+# which is what decides whether CCO deploys the pod identity webhook at
+# all. tls/ holds the service account signing key the issuer's JWKS was
+# made from.
+merge_manifests() {
+    cp "$cluster_dir"/ccoctl-output/manifests/* "$cluster_dir/manifests/"
+    cp -a "$cluster_dir/ccoctl-output/tls" "$cluster_dir/"
 }
 
 create_cluster() {
@@ -466,12 +672,20 @@ trap 'exit 143' TERM
 # Validate the config that will actually be installed; see
 # aws-create-cluster for why a generated stand-in goes to a scratch
 # directory rather than the cluster directory.
+if [ -n "${INSTALL_CONFIG:-}" ] && [ "$credentials_mode" = Manual ]; then
+    die "INSTALL_CONFIG is not supported with AZURE_CREDENTIALS_MODE=Manual" \
+        "The config's resourceGroupName has to be the group ccoctl creates for" \
+        "this cluster, $installation_resource_group, and only the generated config" \
+        "is written to match. Drop INSTALL_CONFIG, or use Passthrough."
+fi
+
 if [ -n "${INSTALL_CONFIG:-}" ]; then
     config="$INSTALL_CONFIG"
     [ -f "$config" ] || die "INSTALL_CONFIG points at $config, which does not exist"
 else
     scratch="$(mktemp -d)"
     CLUSTER_NAME="$cluster_name" PULL_SECRET="$pull_secret" \
+        AZURE_CREDENTIALS_MODE="$credentials_mode" \
         "$here/azure-create-install-config" "$scratch/install-config.yaml" >/dev/null
     config="$scratch/install-config.yaml"
 fi
@@ -488,7 +702,7 @@ if [ -n "${INSTALL_CONFIG:-}" ]; then
 else
     check "metadata.name is RFC 1035 valid"   config_name_is_valid "$config"
 fi
-check "credentialsMode is not Manual"     config_not_manual "$config"
+check "credentialsMode is $credentials_mode" config_mode_matches "$config"
 check "install-config has a pull secret"  config_has_pull_secret "$config"
 check "install-config has an ssh key"     config_has_ssh_key "$config"
 check "region is set"                     test -n "$region"
@@ -496,6 +710,16 @@ check "baseDomainResourceGroupName is set" test -n "$base_domain_rg"
 check "DNS zone for $base_domain"         dns_zone_exists "$base_domain"
 check "no resource groups named ${cluster_name}-*" \
     resource_groups_free "$cluster_name"
+# The -oidc group is covered by the prefix check above; the installation
+# group is the bare name, which that prefix does not match.
+if [ "$credentials_mode" = Manual ]; then
+    check "no resource group named $installation_resource_group" \
+        resource_group_free "$installation_resource_group"
+    check "storage account name $storage_account is valid" \
+        storage_account_name_valid "$storage_account"
+    check "storage account name $storage_account is free" \
+        storage_account_name_available "$storage_account"
+fi
 
 # The record check needs a group that exists, and the two checks above
 # have already said whether it does. Running it anyway would fail a
@@ -515,6 +739,13 @@ info ""
 
 if [ "$dry_run" = true ]; then
     info "Would create $cluster_name in ${region:-<from config>} (subscription $subscription)."
+    info "Credentials: $credentials_mode"
+    if [ "$credentials_mode" = Manual ]; then
+        info "  ccoctl azure create-all would make:"
+        info "    resource group  $oidc_resource_group (OIDC issuer, identities)"
+        info "    resource group  $installation_resource_group (the cluster installs here)"
+        info "    storage account $storage_account"
+    fi
     report
     exit $?
 fi
@@ -530,6 +761,13 @@ step "install config"        prepare_config
 # running rather than only once it finishes.
 step "cluster .envrc"        write_cluster_envrc
 step "cluster facts"         write_cluster_facts
+if [ "$credentials_mode" = Manual ]; then
+    step "ccoctl"                ensure_ccoctl
+    step "manifests"             create_manifests
+    step "credential requests"   extract_credential_requests
+    step "OIDC and identities"   run_ccoctl
+    step "merge ccoctl manifests" merge_manifests
+fi
 step "create cluster"        create_cluster
 # phase, not step: a cluster with a sulking operator is still a cluster
 # you want to keep and look at.
