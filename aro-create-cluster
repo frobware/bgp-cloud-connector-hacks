@@ -54,6 +54,11 @@
 #   AZURE_REGION   default centralus
 #   PULL_SECRET    default ~/.secrets/pull-secret.json
 #   ARO_IDENTITY   service-principal (default) or managed
+#   ARO_RP_OBJECT_ID
+#                  object id of the ARO resource provider's service
+#                  principal in this tenant; default looked up in Entra
+#                  ID, which a service principal without directory
+#                  read, as in an unattended run, cannot do
 
 set -euo pipefail
 
@@ -181,9 +186,17 @@ role_set_matches() {
     return 1
 }
 
+rp_object_id() {
+    if [ -n "${ARO_RP_OBJECT_ID:-}" ]; then
+        printf '%s\n' "$ARO_RP_OBJECT_ID"
+    else
+        az ad sp show --id "$rp_app_id" --query id -o tsv
+    fi
+}
+
 rp_principal_visible() {
     local id
-    id="$(az ad sp show --id "$rp_app_id" --query id -o tsv)" || return 1
+    id="$(rp_object_id)" || return 1
     [ -n "$id" ]
 }
 
@@ -303,7 +316,7 @@ assign_identity_roles() {
             n=$((n + 1))
         fi
     done <<<"$platform_grants"
-    rp="$(az ad sp show --id "$rp_app_id" --query id -o tsv)" || return 1
+    rp="$(rp_object_id)" || return 1
     grant_to "$rp" "$first_party_network_role" "$(vnet_scope)" || return 1
     n=$((n + 1))
     info "  $n role assignments"
