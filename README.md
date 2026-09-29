@@ -506,7 +506,9 @@ written before anything exists, and the destroy scripts work from it
 alone.
 
 Both authenticate as your `az login`; there is no service principal
-file to write. What that login needs:
+file to write. (`aro-create-cluster` can also run as a service
+principal, for a timer; see "Running it headless" below.) What that
+login needs:
 
 - Owner on the subscription, or Contributor plus User Access
   Administrator. Both scripts create role assignments, and Contributor
@@ -555,7 +557,8 @@ resource group in a classic cluster.
 
 `ARO_IDENTITY=managed` builds the other kind of classic cluster, whose
 operators authenticate through workload identity instead of a service
-principal:
+principal. ARO calls it MIWI (managed identity / workload identity),
+and it is the kind bgp-cloud-connector 1.1 has to support first:
 
 - The script creates nine user-assigned identities in `<cluster>`, one
   for the cluster and one per platform operator, and the twenty role
@@ -570,6 +573,50 @@ principal:
   platform identities and the resource provider.
 - Built once, on 4.21.22: `az aro create` took 66 minutes, against 50
   for a service principal cluster the day before.
+
+#### Running it unattended
+
+From cron, a CI job or any other timer, an interactive `az login`
+expires with nobody there to renew it. Log in as a service principal
+instead, such as the one `azure-installer-credentials` makes. It needs
+Contributor and User Access Administrator on the subscription, for the
+identities and role assignments.
+
+A service principal usually cannot read Entra ID, and the script
+otherwise looks up the ARO resource provider's service principal there
+to grant it a role on the vnet. Look it up once as yourself and put it
+in the environment, for example in `.envrc.local`:
+
+```
+az ad sp show --id f1dd0a37-89c6-4e07-bcd1-ffd3d43d8875 --query id -o tsv
+
+export ARO_RP_OBJECT_ID=<that object id>
+```
+
+The id belongs to the tenant, not to a cluster, so one lookup serves
+every run. Without it, a run as a service principal stops at the
+preflight with `resource provider principal visible` and `Insufficient
+privileges to complete the operation`.
+
+Log the service principal in to a directory of its own, so the run does
+not replace your own `az` login. The secret goes through a file, `az`'s
+`@path` form, because a command-line argument is readable from `/proc`
+by anything on the machine:
+
+```
+export AZURE_CONFIG_DIR=$(mktemp -d)
+sp=~/.azure/osServicePrincipal.json
+(umask 077; jq -r .clientSecret "$sp" > "$AZURE_CONFIG_DIR/secret")
+az login --service-principal --tenant "$(jq -r .tenantId "$sp")" \
+    -u "$(jq -r .clientId "$sp")" -p "@$AZURE_CONFIG_DIR/secret" --output none
+rm -f "$AZURE_CONFIG_DIR/secret"
+ARO_IDENTITY=managed direnv exec . ./aro-create-cluster
+```
+
+Allow the job two hours: the create alone takes over an hour, and the
+script then waits up to fifteen minutes for the cluster operators.
+Nothing tears the cluster down; run `aro-destroy-cluster` with the
+directory it names.
 
 ### HCP
 
