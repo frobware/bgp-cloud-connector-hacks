@@ -523,7 +523,7 @@ az login
 
 PULL_SECRET=$HOME/.secrets/pull-secret.json aro-create-cluster --dry-run
 PULL_SECRET=$HOME/.secrets/pull-secret.json aro-create-cluster
-PULL_SECRET=$HOME/.secrets/pull-secret.json ARO_IDENTITY=managed aro-create-cluster
+PULL_SECRET=$HOME/.secrets/pull-secret.json ARO_IDENTITY=service-principal aro-create-cluster
 CLUSTER=clusters/<YYMMDDHHMM>-aro-OCP-<version> aro-destroy-cluster
 
 aro-hcp-create-cluster --dry-run
@@ -546,16 +546,19 @@ resource group in a classic cluster.
   resource and the vnet and is yours; `aro-<cluster>` holds the VMs and
   carries a deny assignment, so nothing but the resource provider may
   touch it.
-- `az aro create` registers an AAD application for the cluster and `az
+- With `ARO_IDENTITY=service-principal`, `az aro create` registers an
+  AAD application for the cluster and `az
   aro delete` does not remove it. `aro-destroy-cluster` does, and it
   finds the application by name even when the create died partway.
-- The last phase grants the cluster's principal Network Contributor
+- With `ARO_IDENTITY=service-principal`, the last phase grants the
+  cluster's principal Network Contributor
   over `<cluster>`, which the operator needs to find and peer a Route
   Server there. The grant can take minutes to become visible, and the
   script waits for it.
 - The vnet leaves 10.0.4.0/27 free for a `RouteServerSubnet`.
 
-`ARO_IDENTITY=managed` builds the other kind of classic cluster, whose
+`ARO_IDENTITY=managed`, the default, builds the other kind of classic
+cluster, whose
 operators authenticate through workload identity instead of a service
 principal. ARO calls it MIWI (managed identity / workload identity),
 and it is the kind bgp-cloud-connector 1.1 has to support first:

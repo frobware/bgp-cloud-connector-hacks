@@ -31,9 +31,11 @@
 # operator needs it to find and peer the Route Server, which lives in
 # that group rather than the managed one.
 #
-# ARO_IDENTITY=managed builds the other kind of classic cluster: no
-# service principal, no AAD application, and operators that
-# authenticate through workload identity. It needs nine user-assigned
+# ARO_IDENTITY=managed, the default because it is the kind
+# bgp-cloud-connector 1.1 supports first, builds the other kind of
+# classic cluster from the one described above: no service principal,
+# no AAD application, and operators that authenticate through workload
+# identity. It needs nine user-assigned
 # identities -- one for the cluster, one per platform operator -- and
 # twenty role assignments that az aro create makes for a service
 # principal but not for these. Both are made here, in the cluster's
@@ -53,7 +55,7 @@
 #                  latest version az aro get-versions offers the region
 #   AZURE_REGION   default centralus
 #   PULL_SECRET    default ~/.secrets/pull-secret.json
-#   ARO_IDENTITY   service-principal (default) or managed
+#   ARO_IDENTITY   managed (default) or service-principal
 #   ARO_RP_OBJECT_ID
 #                  object id of the ARO resource provider's service
 #                  principal in this tenant; default looked up in Entra
@@ -67,7 +69,7 @@ source "$here/azure-lib.bash"
 
 parse_args_only_common "$@"
 
-identity_mode="${ARO_IDENTITY:-service-principal}"
+identity_mode="${ARO_IDENTITY:-managed}"
 case "$identity_mode" in
     service-principal|managed) ;;
     *) die "ARO_IDENTITY must be service-principal or managed, not $identity_mode" ;;
