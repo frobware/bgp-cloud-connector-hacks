@@ -347,8 +347,15 @@ create_cluster() {
         --pull-secret "$pull_secret" \
         "${args[@]}" \
         --debug --output json > "$cluster_dir/aro-cluster.json" 2> "$log" || status=$?
+    # Printed by the shell rather than by grep: journald attributes a
+    # line to its unit from the process that wrote it, and grep exits
+    # before journald reads its lines, so under a systemd unit they lose
+    # the unit and journalctl -u never shows them.
     if [ "$status" -ne 0 ]; then
-        grep -E '^(ERROR|Code|Message):' "$log" >&2 || true
+        local line
+        while IFS= read -r line; do
+            warn "$line"
+        done < <(grep -E '^(ERROR|Code|Message):' "$log" || true)
     fi
     info "  az --debug log: $log"
     # Here as well as in the phase below, which a failed create never
