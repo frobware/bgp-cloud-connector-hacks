@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+#
+# Tear down a cluster built by rosa-create-cluster.
+#
+#   CLUSTER=$PWD/clusters/2609301140-rosa-OCP-4.22.15 rosa-destroy-cluster --dry-run
+#   CLUSTER=$PWD/clusters/2609301140-rosa-OCP-4.22.15 rosa-destroy-cluster
+#
+# The reverse of the create, in this order:
+#
+#   1. the cluster, with rosa delete cluster, waiting until OCM no longer
+#      knows it. Everything below is what the cluster runs on, so it
+#      waits for that.
+#   2. the operator roles, by prefix
+#   3. the OIDC provider, then the OIDC config it belongs to
+#   4. the account roles, by prefix
+#   5. the network: the CloudFormation stack, which takes the VPC, its
+#      subnets and gateways with it
+#
+# The cluster is treated as gone only when rosa says "There is no
+# cluster with identifier or name". Any other failure to look -- an
+# expired AWS session, an OCM login that has lapsed -- is not evidence
+# of absence, and deleting the roles on the strength of it would leave a
+# cluster OCM can no longer manage or remove.
+#
+# Every name comes from cluster-facts, written before anything existed,
+# so a create that died in its first minute still leaves enough to clean
+# up after. The recorded region is passed to every call; an AWS_REGION in
+# your environment is not consulted.
+#
+# Every phase runs even if an earlier one failed, except that those
+# below the cluster wait for it to be gone; failures are collected and
+# reported at the end. The directory stays.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/aws-lib.bash"
+
+parse_args_only_common "$@"
+require_cmd rosa aws jq
+
+[ -n "${CLUSTER:-}" ] || die "CLUSTER is not set" \
+    "Point it at the cluster directory:" \
+    "  CLUSTER=\$PWD/clusters/<YYMMDDHHMM>-rosa-OCP-<version> ${0##*/}"
+
+facts="$CLUSTER/cluster-facts"
+[ -f "$facts" ] || die "no cluster-facts in $CLUSTER"
+
+read_fact() {
+    awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1"
+}
+
+cloud="$(read_fact "$facts" cloud)"
+[ "$cloud" = "rosa" ] || die "this cluster directory belongs to ${cloud:-an unknown cloud}" \
+    "Use ${cloud:-the matching}-destroy-cluster instead."
+
+cluster_name="$(read_fact "$facts" cluster_name)"
+prefix="$(read_fact "$facts" prefix)"
+region="$(read_fact "$facts" region)"
+aws_account="$(read_fact "$facts" aws_account)"
+stack_name="$(read_fact "$facts" stack_name)"
+oidc_config_id="$(read_fact "$facts" oidc_config_id)"
+export AWS_PROFILE="${AWS_PROFILE:-$(read_fact "$facts" aws_profile)}"
+
+for k in cluster_name prefix region aws_account stack_name; do
+    [ -n "${!k}" ] || die "cluster-facts has no $k" "It is written by rosa-create-cluster; is $facts one of its?"
+done
+
+require_aws
+current_account="$(aws sts get-caller-identity --query Account --output text)"
+[ "$current_account" = "$aws_account" ] || die "AWS profile $AWS_PROFILE is account $current_account" \
+    "The cluster was built in $aws_account. Select a profile for that account."
+
+rosa() { command rosa "$@" --region "$region" 2> >(grep -v -E 'not up to date|recommended that you update' >&2); }
+
+# Prints present or absent, or fails having said why it could not tell.
+cluster_state() {
+    local out
+    if capture out rosa describe cluster -c "$cluster_name"; then
+        echo present
+    elif grep -q 'There is no cluster with identifier or name' <<<"$out"; then
+        echo absent
+    else
+        warn "  could not tell whether the cluster exists:"
+        explain "$out"
+        return 1
+    fi
+}
+
+cluster_absent() { [ "$(cluster_state)" = absent ]; }
+
+roles_with_prefix() {
+    aws iam list-roles --query "Roles[?starts_with(RoleName, '$prefix-')].RoleName" --output text
+}
+
+stack_exists() {
+    local out
+    capture out aws cloudformation describe-stacks --region "$region" --stack-name "$stack_name" && return 0
+    grep -q 'does not exist' <<<"$out" && return 1
+    warn "  could not tell whether stack $stack_name exists:"
+    explain "$out"
+    return 2
+}
+
+oidc_config_exists() {
+    [ -n "$oidc_config_id" ] || return 1
+    rosa list oidc-config -o json 2>/dev/null | jq -e --arg id "$oidc_config_id" 'map(select(.id == $id)) | length > 0' >/dev/null
+}
+
+info "Cluster:     $cluster_name"
+info "Prefix:      $prefix"
+info "Region:      $region"
+info "AWS account: $aws_account (profile $AWS_PROFILE)"
+info "Stack:       $stack_name"
+info "OIDC config: ${oidc_config_id:-<not recorded>}"
+info ""
+
+cluster_gone=false
+
+delete_cluster() {
+    local state
+    state="$(cluster_state)" || return 1
+    if [ "$state" = "absent" ]; then
+        info "  no cluster"
+        cluster_gone=true
+        return 0
+    fi
+    try rosa delete cluster -c "$cluster_name" -y || return 1
+    [ "$dry_run" = true ] && { cluster_gone=true; return 0; }
+    wait_until 3600 60 "OCM to finish deleting the cluster" cluster_absent || return 1
+    cluster_gone=true
+}
+
+# Everything below the cluster refuses to run while it may still exist.
+need_cluster_gone() {
+    [ "$cluster_gone" = true ] && return 0
+    warn "  the cluster may still exist; not removing what it runs on"
+    return 1
+}
+
+delete_operator_roles() {
+    need_cluster_gone || return 1
+    if [ -z "$(roles_with_prefix | tr '\t' '\n' | grep -v -- '-HCP-ROSA-' || true)" ]; then
+        info "  no operator roles"
+        return 0
+    fi
+    try rosa delete operator-roles --prefix "$prefix" --mode auto -y
+}
+
+delete_oidc() {
+    need_cluster_gone || return 1
+    if [ -z "$oidc_config_id" ]; then
+        info "  no OIDC config recorded"
+        return 0
+    fi
+    if ! oidc_config_exists; then
+        info "  no OIDC config $oidc_config_id"
+        return 0
+    fi
+    # The provider may already be gone with the cluster; its absence is
+    # not a failure, the config's survival is.
+    try rosa delete oidc-provider --oidc-config-id "$oidc_config_id" --mode auto -y || true
+    try rosa delete oidc-config --oidc-config-id "$oidc_config_id" --mode auto -y
+}
+
+delete_account_roles() {
+    need_cluster_gone || return 1
+    if [ -z "$(roles_with_prefix | tr '\t' '\n' | grep -- '-HCP-ROSA-' || true)" ]; then
+        info "  no account roles"
+        return 0
+    fi
+    try rosa delete account-roles --hosted-cp --prefix "$prefix" --mode auto -y
+}
+
+delete_network() {
+    need_cluster_gone || return 1
+    local rc=0
+    stack_exists || rc=$?
+    case "$rc" in
+        1) info "  no stack $stack_name"; return 0 ;;
+        2) return 1 ;;
+    esac
+    try aws cloudformation delete-stack --region "$region" --stack-name "$stack_name" || return 1
+    try aws cloudformation wait stack-delete-complete --region "$region" --stack-name "$stack_name"
+}
+
+# Look rather than trust: after a clean run every line here is absent.
+# A lookup that fails is a failure, never an empty answer.
+audit() {
+    if [ "$dry_run" = true ]; then
+        info "  (skipped: nothing was deleted)"
+        return 0
+    fi
+    local left=false state roles rc=0
+    state="$(cluster_state)" || return 1
+    [ "$state" = "absent" ] || { warn "  cluster      $cluster_name"; left=true; }
+    roles="$(roles_with_prefix)" || return 1
+    [ -z "$roles" ] || { warn "  IAM roles    $roles"; left=true; }
+    if oidc_config_exists; then warn "  OIDC config  $oidc_config_id"; left=true; fi
+    stack_exists || rc=$?
+    case "$rc" in
+        0) warn "  stack        $stack_name"; left=true ;;
+        2) return 1 ;;
+    esac
+    [ "$left" = false ] || return 1
+    info "  nothing"
+}
+
+phase "cluster"          delete_cluster
+phase "operator roles"   delete_operator_roles
+phase "OIDC"             delete_oidc
+phase "account roles"    delete_account_roles
+phase "network"          delete_network
+phase "remaining"        audit
+
+info "Cloud resources only. This directory is untouched:"
+info "  $CLUSTER"
+report

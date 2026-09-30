@@ -1,0 +1,443 @@
+#!/usr/bin/env bash
+#
+# Build a ROSA cluster with hosted control planes (HCP), checking things
+# first.
+#
+#   rosa-create-cluster --dry-run
+#   rosa-create-cluster
+#
+# ROSA is not built by openshift-install. OCM, Red Hat's service behind
+# console.redhat.com, builds it in your AWS account, acting through IAM
+# roles you create there, and the rosa CLI is OCM's client. So this
+# script prepares the AWS side, asks OCM for the cluster, and waits.
+#
+# The order is CI's (openshift/release rosa-aws-sts-hcp), because that is
+# the cluster the operator is tested on:
+#
+#   1. a VPC, from Red Hat's rosa-quickstart-default-vpc CloudFormation
+#      template via rosa create network, with public and private subnets
+#      in each zone
+#   2. account roles, <prefix>-HCP-ROSA-{Installer,Support,Worker}-Role,
+#      created for this cluster rather than shared, so teardown can
+#      remove them without asking who else uses them
+#   3. an OIDC config hosted by Red Hat, and its OIDC provider
+#   4. operator roles under the same prefix
+#   5. the cluster, validated first with rosa create cluster --dry-run
+#      so that OCM rejects a bad request before an hour's wait
+#   6. an htpasswd cluster-admin, and auth/kubeconfig from logging in
+#
+# CI takes the region for IAM from its lease and for the cluster from
+# REGION, which can differ. Here there is one region, recorded in
+# cluster-facts, and every call names it.
+#
+# Two things must already hold, once per AWS account, and the preflight
+# checks both: you are logged in to OCM (rosa login --use-device-code),
+# and the account is linked to your OCM user and organisation (rosa
+# create user-role, rosa create ocm-role). See ROSA.md in the private
+# repo for why and how.
+#
+# The prefix is the cluster name, <user>-<YYMMDDHHMM>, so every role,
+# the stack and the cluster share it, and a failed attempt leaves
+# nothing a second attempt collides with: the next run has another
+# name. Retrying means running again.
+#
+# Environment:
+#
+#   CLUSTER_USER      default $USER
+#   CLUSTER           cluster directory, default clusters/<YYMMDDHHMM>-rosa-OCP-<version>
+#   ROSA_VERSION      X.Y.Z, or X.Y for its latest patch; default the
+#                     latest the stable channel offers for HCP
+#   AWS_REGION        default us-west-2, CI's
+#   AWS_PROFILE       default saml
+#   ROSA_ZONES        availability zones, default 3, as CI's job
+#   ROSA_REPLICAS     worker nodes, default 3
+#   ROSA_MACHINE_TYPE worker instance type, default m5.2xlarge, CI's
+#   ROSA_BILLING_ACCOUNT
+#                     required: the AWS account billed for ROSA. HCP is
+#                     billed through an AWS Marketplace ROSA contract,
+#                     and OCM refuses to build without naming the account
+#                     that holds one ("A billing account is required for
+#                     Hosted Control Plane clusters"). It need not be the
+#                     account the cluster runs in; the QE account holds
+#                     no such contract.
+
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+source "$here/aws-lib.bash"
+
+parse_args_only_common "$@"
+
+export AWS_PROFILE="${AWS_PROFILE:-saml}"
+region="${AWS_REGION:-us-west-2}"
+zones="${ROSA_ZONES:-3}"
+replicas="${ROSA_REPLICAS:-3}"
+machine_type="${ROSA_MACHINE_TYPE:-m5.2xlarge}"
+billing_account="${ROSA_BILLING_ACCOUNT:-}"
+channel_group=stable
+
+short_name="$(date +%y%m%d%H%M)"
+cluster_user="${CLUSTER_USER:-${USER:-$(whoami)}}"
+cluster_name="$cluster_user-$short_name"
+prefix="$cluster_name"
+stack_name="$cluster_name-vpc"
+
+# rosa prints an update nag on every call; nothing here wants it.
+rosa() { command rosa "$@" --region "$region" 2> >(grep -v -E 'not up to date|recommended that you update' >&2); }
+
+# The version the stable channel offers for HCP. X.Y resolves to its
+# latest patch, and the resolved version is what the directory and the
+# create both use, so the two cannot disagree.
+resolve_rosa_version() {
+    local want="${ROSA_VERSION:-}" available
+    available="$(rosa list versions --hosted-cp --channel-group "$channel_group" -o json | jq -r '.[].raw_id')" || return 1
+    if [ -z "$want" ]; then
+        printf '%s\n' "$available" | sort -V | tail -1
+    elif [[ "$want" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        printf '%s\n' "$available" | grep -F "$want." | sort -V | tail -1
+    else
+        printf '%s\n' "$available" | grep -xF "$want"
+    fi
+}
+
+# Before the version lookup, which needs both logins.
+require_cmd rosa aws oc jq openssl
+require_aws
+
+ocp_version="$(resolve_rosa_version || true)"
+[ -n "$ocp_version" ] || die "no ROSA HCP version ${ROSA_VERSION:+matching $ROSA_VERSION }on the $channel_group channel" \
+    "Check the OCM login: rosa whoami" \
+    "Available: $(rosa list versions --hosted-cp --channel-group "$channel_group" -o json 2>/dev/null | jq -r '.[].raw_id' | sort -V | tail -5 | tr '\n' ' ')"
+
+cluster_dir="${CLUSTER:-$here/clusters/$short_name-rosa-OCP-$ocp_version}"
+aws_account="$(aws sts get-caller-identity --query Account --output text)"
+
+role_arn() { printf 'arn:aws:iam::%s:role/%s-HCP-ROSA-%s-Role' "$aws_account" "$prefix" "$1"; }
+
+# ---------------------------------------------------------------------
+# Predicates
+# ---------------------------------------------------------------------
+
+ocm_logged_in() { rosa whoami; }
+
+billing_account_set() {
+    [ -n "$billing_account" ] && return 0
+    printf 'HCP needs the AWS account holding a ROSA Marketplace contract; see the header\n'
+    return 1
+}
+
+# The user role links you to the account, the OCM role your organisation.
+# OCM refuses to build without both.
+user_role_linked() {
+    rosa list user-roles -o json | jq -e \
+        'map(select(.Linked == "Yes" or .Linked == true)) | length > 0' >/dev/null ||
+        { rosa list user-roles; return 1; }
+}
+
+ocm_role_linked() {
+    rosa list ocm-roles -o json | jq -e \
+        'map(select(.Linked == "Yes" or .Linked == true)) | length > 0' >/dev/null ||
+        { rosa list ocm-roles; return 1; }
+}
+
+cluster_name_free() {
+    local out
+    out="$(rosa describe cluster -c "$1" 2>&1)" && { printf 'exists\n'; return 1; }
+    grep -q 'There is no cluster with identifier or name' <<<"$out" && return 0
+    printf '%s\n' "$out"
+    return 1
+}
+
+stack_free() {
+    local out
+    out="$(aws cloudformation describe-stacks --region "$region" --stack-name "$1" 2>&1)" && { printf 'exists\n'; return 1; }
+    grep -q 'does not exist' <<<"$out" && return 0
+    printf '%s\n' "$out"
+    return 1
+}
+
+no_roles_with_prefix() {
+    local roles
+    roles="$(aws iam list-roles --query "Roles[?starts_with(RoleName, '$1-')].RoleName" --output text)" || return 1
+    [ -z "$roles" ] && return 0
+    printf 'already there: %s\n' "$roles"
+    return 1
+}
+
+enough_zones() {
+    local n
+    n="$(aws ec2 describe-availability-zones --region "$region" \
+        --filters Name=state,Values=available Name=zone-type,Values=availability-zone \
+        --query 'length(AvailabilityZones)' --output text)" || return 1
+    [ "$n" -ge "$zones" ] && return 0
+    printf '%s offers %s zones\n' "$region" "$n"
+    return 1
+}
+
+cluster_dir_free() { [ ! -e "$1/cluster-facts" ]; }
+
+dir_is_empty() {
+    [ ! -d "$1" ] || [ -z "$(ls -A "$1" 2>/dev/null)" ]
+}
+
+name_is_rfc1035() { printf '%s' "$1" | grep -qE '^[a-z]([-a-z0-9]*[a-z0-9])?$'; }
+
+# rosa caps the operator-role prefix at 32 characters.
+prefix_short_enough() { [ "${#1}" -le 32 ]; }
+
+# ---------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------
+
+facts_file() { printf '%s' "$cluster_dir/cluster-facts"; }
+
+# Written before anything exists, so a create that dies at any point
+# leaves the names teardown needs. Ids learned later are appended.
+write_cluster_facts() {
+    mkdir -p "$cluster_dir"
+    cat > "$(facts_file)" <<EOF
+# Written by rosa-create-cluster. Survives teardown on purpose.
+cloud=rosa
+cluster_name=$cluster_name
+prefix=$prefix
+region=$region
+aws_account=$aws_account
+aws_profile=$AWS_PROFILE
+ocm_url=$(rosa whoami -o json 2>/dev/null | jq -r '."OCM API" // empty')
+stack_name=$stack_name
+ocp_version=$ocp_version
+cluster_dir=$cluster_dir
+EOF
+    info "  wrote $(facts_file)"
+}
+
+record_fact() {
+    grep -q "^$1=" "$(facts_file)" 2>/dev/null && return 0
+    printf '%s=%s\n' "$1" "$2" >> "$(facts_file)"
+    info "  recorded $1=$2"
+}
+
+write_cluster_envrc() {
+    mkdir -p "$cluster_dir"
+    cat > "$cluster_dir/.envrc" <<'EOF'
+# Written by rosa-create-cluster. Keeps the repo's flake shell, then
+# points oc at this cluster.
+source_up_if_exists
+export KUBECONFIG="$PWD/auth/kubeconfig"
+EOF
+    if command -v direnv >/dev/null 2>&1 && direnv allow "$cluster_dir" 2>/dev/null; then
+        info "  wrote and allowed $cluster_dir/.envrc"
+    else
+        info "  wrote $cluster_dir/.envrc (run direnv allow, or export KUBECONFIG)"
+    fi
+}
+
+subnet_ids=""
+
+create_network() {
+    rosa create network rosa-quickstart-default-vpc --mode auto -y \
+        --param Region="$region" --param Name="$stack_name" \
+        --param AvailabilityZoneCount="$zones" --param VpcCidr=10.0.0.0/16 || return 1
+    subnet_ids="$(aws ec2 describe-subnets --region "$region" \
+        --filters "Name=tag:aws:cloudformation:stack-name,Values=$stack_name" \
+        --query 'Subnets[].SubnetId' --output text | tr '\t' ',')" || return 1
+    [ -n "$subnet_ids" ] || { warn "  stack $stack_name has no subnets"; return 1; }
+    info "  subnets $subnet_ids"
+}
+
+create_account_roles() {
+    rosa create account-roles --hosted-cp --mode auto -y --prefix "$prefix" \
+        --version "${ocp_version%.*}" --channel-group "$channel_group" || return 1
+    local kind
+    for kind in Installer Support Worker; do
+        aws iam get-role --role-name "$prefix-HCP-ROSA-$kind-Role" --query Role.Arn --output text || return 1
+    done
+}
+
+create_oidc() {
+    local out id
+    out="$(rosa create oidc-config --managed --mode auto -y -o json)" || return 1
+    id="$(jq -r '.id // empty' <<<"$out")"
+    [ -n "$id" ] || { warn "  no OIDC config id in:"; explain "$out"; return 1; }
+    record_fact oidc_config_id "$id"
+    rosa create oidc-provider --oidc-config-id "$id" --mode auto -y
+}
+
+oidc_config_id() { grep '^oidc_config_id=' "$(facts_file)" | cut -d= -f2; }
+
+create_operator_roles() {
+    rosa create operator-roles --hosted-cp --mode auto -y --prefix "$prefix" \
+        --oidc-config-id "$(oidc_config_id)" --installer-role-arn "$(role_arn Installer)"
+}
+
+cluster_args() {
+    printf '%s\n' --cluster-name "$cluster_name" --hosted-cp --sts \
+        --billing-account "$billing_account" \
+        --version "$ocp_version" --channel-group "$channel_group" \
+        --subnet-ids "$subnet_ids" \
+        --role-arn "$(role_arn Installer)" \
+        --support-role-arn "$(role_arn Support)" \
+        --worker-iam-role-arn "$(role_arn Worker)" \
+        --oidc-config-id "$(oidc_config_id)" \
+        --operator-roles-prefix "$prefix" \
+        --compute-machine-type "$machine_type" --replicas "$replicas"
+}
+
+validate_cluster() {
+    local args
+    mapfile -t args < <(cluster_args)
+    rosa create cluster "${args[@]}" --mode auto -y --dry-run
+}
+
+create_cluster() {
+    local args id
+    mapfile -t args < <(cluster_args)
+    rosa create cluster "${args[@]}" --mode auto -y || return 1
+    id="$(rosa describe cluster -c "$cluster_name" -o json | jq -r '.id // empty')" || return 1
+    [ -n "$id" ] || return 1
+    record_fact cluster_id "$id"
+}
+
+# Ready, or a reason to stop: an error state does not become ready by
+# waiting, and wait_until would otherwise sit out its whole timeout.
+cluster_state=""
+cluster_settled() {
+    cluster_state="$(rosa describe cluster -c "$cluster_name" -o json | jq -r '.state // empty')" || return 1
+    info "  state: ${cluster_state:-unknown}"
+    [ "$cluster_state" = ready ] || [ "$cluster_state" = error ]
+}
+
+wait_for_cluster() {
+    wait_until 5400 60 "the cluster to be ready" cluster_settled || return 1
+    [ "$cluster_state" = ready ] && return 0
+    rosa describe cluster -c "$cluster_name" >&2 || true
+    return 1
+}
+
+# rosa's rules: at least 14 characters, with upper and lower case and a
+# digit or symbol. The fixed tail guarantees the classes.
+generate_password() {
+    printf '%sAa9' "$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
+}
+
+api_url() { rosa describe cluster -c "$cluster_name" -o json | jq -r '.api.url // empty'; }
+
+# A new htpasswd user takes minutes to reach the OAuth server; retried,
+# not slept. The password goes on oc's command line because oc login
+# has no other non-interactive way to take it.
+login_as_admin() {
+    oc login "$(api_url)" --username cluster-admin --password "$(cat "$cluster_dir/auth/kubeadmin-password")" \
+        --kubeconfig "$cluster_dir/auth/kubeconfig" >/dev/null 2>&1
+}
+
+create_admin() {
+    mkdir -p "$cluster_dir/auth"
+    ( umask 077; generate_password > "$cluster_dir/auth/kubeadmin-password" )
+    rosa create admin -c "$cluster_name" -p "$(cat "$cluster_dir/auth/kubeadmin-password")" >/dev/null || return 1
+    wait_until 1200 30 "the cluster-admin login to work" login_as_admin || return 1
+    chmod 600 "$cluster_dir/auth/kubeconfig"
+    info "  wrote $cluster_dir/auth/kubeconfig and kubeadmin-password"
+}
+
+cluster_oc() { KUBECONFIG="$cluster_dir/auth/kubeconfig" oc "$@"; }
+
+workers_ready() {
+    local n
+    n="$(cluster_oc get nodes -o json 2>/dev/null | jq '[.items[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))] | length')" || return 1
+    info "  $n/$replicas nodes Ready"
+    [ "$n" -ge "$replicas" ]
+}
+
+# Conditions, never columns; see CLAUDE.md.
+operators_unavailable() {
+    cluster_oc get co -o json 2>/dev/null \
+        | jq -r '[.items[] | select(([(.status.conditions // [])[]
+            | select(.type=="Available") | .status] | first) != "True")
+            | .metadata.name] | join(" ")'
+}
+
+all_operators_available() {
+    local bad total
+    total="$(cluster_oc get co -o json 2>/dev/null | jq -r '.items | length')"
+    [ -n "$total" ] && [ "$total" != 0 ] || return 1
+    bad="$(operators_unavailable)"
+    if [ -z "$bad" ]; then
+        info "  $total/$total operators Available"
+        return 0
+    fi
+    info "  waiting on: $bad"
+    return 1
+}
+
+verify_cluster() {
+    wait_until 1800 30 "$replicas worker nodes to be Ready" workers_ready || return 1
+    wait_until 1800 30 "every cluster operator to become Available" all_operators_available
+}
+
+# ---------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------
+
+info "Cluster:     $cluster_name ($ocp_version, $region, $zones zones, $replicas x $machine_type)"
+info "Prefix:      $prefix (account roles, operator roles, stack $stack_name)"
+info "AWS account: $aws_account (profile $AWS_PROFILE)"
+info "Directory:   $cluster_dir"
+info ""
+
+info "--- preflight ---"
+check "ROSA_BILLING_ACCOUNT is set"           billing_account_set
+check "logged in to OCM"                      ocm_logged_in
+check "OCM user role linked"                  user_role_linked
+check "OCM organisation role linked"          ocm_role_linked
+check "$region has $zones availability zones" enough_zones
+check "cluster directory unused"              cluster_dir_free "$cluster_dir"
+check "cluster directory is empty"            dir_is_empty "$cluster_dir"
+check "name is RFC 1035 valid"                name_is_rfc1035 "$cluster_name"
+check "prefix within 32 characters"           prefix_short_enough "$prefix"
+check "no cluster named $cluster_name"        cluster_name_free "$cluster_name"
+check "no stack named $stack_name"            stack_free "$stack_name"
+check "no IAM roles named $prefix-*"          no_roles_with_prefix "$prefix"
+abort_if_failed
+info ""
+
+if [ "$dry_run" = true ]; then
+    info "Would create $cluster_name in $region (account $aws_account)."
+    report
+    exit $?
+fi
+
+on_exit() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ -f "$(facts_file)" ]; then
+        warn ""
+        warn "Failed partway through. To remove what exists:"
+        warn "  CLUSTER=$cluster_dir rosa-destroy-cluster"
+    fi
+}
+trap on_exit EXIT
+
+step "cluster .envrc"        write_cluster_envrc
+step "cluster facts"         write_cluster_facts
+step "network"               create_network
+step "account roles"         create_account_roles
+step "OIDC config"           create_oidc
+step "operator roles"        create_operator_roles
+step "validate request"      validate_cluster
+step "create cluster"        create_cluster
+step "wait for cluster"      wait_for_cluster
+step "cluster admin"         create_admin
+# phase, not step: a cluster with a slow operator is still a cluster
+# you want to keep and look at.
+phase "verify cluster"       verify_cluster
+
+trap - EXIT
+
+info ""
+info "Cluster:    $cluster_name ($(grep '^cluster_id=' "$(facts_file)" | cut -d= -f2))"
+info "Kubeconfig: $cluster_dir/auth/kubeconfig"
+info "            export KUBECONFIG=$cluster_dir/auth/kubeconfig"
+info "Password:   $cluster_dir/auth/kubeadmin-password (user cluster-admin)"
+info ""
+info "Tear it down with:"
+info "  CLUSTER=$cluster_dir rosa-destroy-cluster"
+report
