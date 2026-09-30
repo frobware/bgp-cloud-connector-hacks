@@ -331,16 +331,26 @@ identity_args() {
     done
 }
 
+# --debug records every request and response, with the request and
+# correlation ids Microsoft asks for when the resource provider fails
+# with nothing more than "Deployment failed". It goes to a file beside
+# cluster-facts rather than to the terminal: it runs to thousands of
+# lines, and the create sends the pull secret, so the file is 0600.
 create_cluster() {
-    local status=0 args
+    local status=0 args log="$cluster_dir/az-aro-create.log"
     mapfile -t args < <(identity_args)
+    ( umask 077; : > "$log" )
     az aro create -g "$resource_group" -n "$cluster_name" \
         --location "$region" --version "$ocp_version" \
         --vnet "$vnet" --master-subnet master-subnet --worker-subnet worker-subnet \
         --cluster-resource-group "$managed_resource_group" \
         --pull-secret "$pull_secret" \
         "${args[@]}" \
-        --output json > "$cluster_dir/aro-cluster.json" || status=$?
+        --debug --output json > "$cluster_dir/aro-cluster.json" 2> "$log" || status=$?
+    if [ "$status" -ne 0 ]; then
+        grep -E '^(ERROR|Code|Message):' "$log" >&2 || true
+    fi
+    info "  az --debug log: $log"
     # Here as well as in the phase below, which a failed create never
     # reaches: a create that dies after registering the application is
     # exactly when teardown needs its id.
