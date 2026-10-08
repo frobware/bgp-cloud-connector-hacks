@@ -58,7 +58,7 @@ for an hour.
 |:---|:---|
 | `lib.bash` | Shared helpers. Source it, do not run it. |
 | `aws-lib.bash`, `azure-lib.bash`, `gcp-lib.bash` | Cloud-specific helpers layered over `lib.bash` |
-| `get-openshift-install` | Fetches `openshift-install` from the mirror. No `aws-` prefix: it is the same binary whichever cloud you point it at. |
+| `get-openshift-install` | Fetches `openshift-install` from the mirror, or extracts it from a release controller payload when `OCP_RELEASE` names one. No `aws-` prefix: it is the same binary whichever cloud you point it at. |
 | `aws-create-cluster` | Builds a cluster. Preflights everything first and owns the whole sequence. |
 | `aws-create-install-config` | Writes an install-config.yaml. Three masters by default, for the reason below. |
 | `aws-create-route-servers` | Creates the AWS Route Servers the operator expects to discover |
@@ -229,6 +229,66 @@ cluster directory by hand.
 
 The symptom is indistinguishable from a broken control plane, which is
 why it is worth knowing in advance.
+
+### Nightlies and ci builds
+
+The mirror carries released versions and engineering candidates, so
+the newest 4.23 it offers is `4.23.0-ec.1`. Anything fresher lives on
+the release controller as a payload image, and `OCP_RELEASE` names
+one. A stream takes its latest accepted build; a full name takes that
+build whatever its phase:
+
+```
+OCP_RELEASE=4.23.0-0.nightly ./aws-create-cluster
+OCP_RELEASE=4.23.0-0.ci-2026-10-07-172611 ./aws-create-cluster
+```
+
+The same variable works for `azure-create-cluster` and
+`gcp-create-cluster`. The installer is extracted from the payload with
+`oc adm release extract`, so the pull secret needs an entry for the
+registry the payload is on. Nightlies are on
+`registry.ci.openshift.org`; ci builds are on
+`quay-proxy.ci.openshift.org`, which takes the same token under its
+own hostname:
+
+```
+jq '.auths["quay-proxy.ci.openshift.org"] = .auths["registry.ci.openshift.org"]' \
+    ~/.secrets/pull-secret.json > /tmp/ps && mv /tmp/ps ~/.secrets/pull-secret.json
+```
+
+The cluster pulls from the same registry, so the entry has to be in
+the pull secret that goes into install-config.yaml too. By default
+that is the same file, and `get-openshift-install` refuses to start
+without it rather than letting `oc` report "unauthorized".
+
+Then there is a trap, and it looks like the credential-request one
+above: bootstrap times out at 45 minutes with no error that names the
+cause. The payload ships a ClusterImagePolicy that requires a sigstore
+signature on every image from `quay.io/openshift-release-dev`. A
+released payload's images are signed; a nightly's are not. The policy
+is rendered into the masters' `/etc/containers/policy.json` at
+bootstrap, so they cannot pull the machine-config-daemon, never
+register, and the API serves an empty node list for the whole 45
+minutes. The bootstrap node keeps the stock policy and pulls the same
+images without complaint, which makes it read as a networking fault on
+the private subnets. The tell is on a master:
+
+```
+journalctl -u machine-config-daemon-pull
+  Source image rejected: A signature was required, but no signature exists
+```
+
+The create scripts avoid it by exporting
+`OPENSHIFT_INSTALL_EXPERIMENTAL_DISABLE_IMAGE_POLICY=true` whenever
+`OCP_RELEASE` is set. The installer then marks that policy unmanaged
+in the CVO overrides, and the CVO's bootstrap render drops any
+manifest so marked, so it never reaches the machine-config-operator.
+CI sets the same variable on every install. A mirror install leaves
+it unset, since released images satisfy the policy and there is no
+reason to weaken it.
+
+The resolved build name goes into the cluster directory, so a nightly
+cluster is `clusters/<YYMMDDHHMM>-aws-OCP-4.23.0-0.nightly-<date>`.
 
 ### Sessions are shorter than installs
 
