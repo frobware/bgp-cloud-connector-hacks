@@ -119,6 +119,16 @@ ocp_version="$(resolve_ocp_version || true)"
     "Check the VPN, the mirror, and OCP_CHANNEL (currently ${OCP_CHANNEL:-stable-4.22})." \
     "Or set OPENSHIFT_INSTALL to a binary you already have."
 
+# A release controller build ships unsigned images under a payload
+# ClusterImagePolicy that requires a signature on them, so the masters
+# cannot pull the machine-config-daemon and bootstrap times out after
+# 45 minutes with nothing in the logs that says why. The installer
+# reads this variable and marks that policy unmanaged in the CVO
+# overrides, which keeps it out of the bootstrap render. CI installs
+# every nightly this way. Released images are signed, so the mirror
+# path keeps the policy.
+[ -z "${OCP_RELEASE:-}" ] || export OPENSHIFT_INSTALL_EXPERIMENTAL_DISABLE_IMAGE_POLICY=true
+
 # The timestamp leads so that clusters/ lists in build order whatever
 # the cloud. aws- follows it, because clusters/ holds every cloud and
 # the directory is how you tell which teardown script a cluster wants;

@@ -79,6 +79,12 @@ ocp_version="$(resolve_ocp_version || true)"
     "Check the VPN, the mirror, and OCP_CHANNEL (currently ${OCP_CHANNEL:-stable-4.22})." \
     "Or set OPENSHIFT_INSTALL to a binary you already have."
 
+# A release controller build ships unsigned images under a payload
+# ClusterImagePolicy that requires a signature on them; see
+# aws-create-cluster. Without this the masters cannot pull the
+# machine-config-daemon and bootstrap times out.
+[ -z "${OCP_RELEASE:-}" ] || export OPENSHIFT_INSTALL_EXPERIMENTAL_DISABLE_IMAGE_POLICY=true
+
 # The timestamp leads so that clusters/ lists in build order whatever
 # the cloud. gcp- follows it, because clusters/ mixes clouds and the
 # directory is how you tell which teardown script a cluster wants.
