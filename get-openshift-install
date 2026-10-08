@@ -5,6 +5,26 @@
 #   get-openshift-install                 # newest in the default channel
 #   OCP_CHANNEL=stable-4.21 get-openshift-install
 #   OCP_VERSION=4.22.8 get-openshift-install
+#   OCP_RELEASE=4.23.0-0.nightly get-openshift-install
+#   OCP_RELEASE=4.23.0-0.ci-2026-10-07-172611 get-openshift-install
+#
+# The first three come off the mirror as a tarball. OCP_RELEASE names a
+# build on the release controller instead, which is where anything
+# newer than the mirror's engineering candidates lives: a stream name
+# (4.23.0-0.nightly, 4.23.0-0.ci) takes its latest accepted build, a
+# full name takes that build. The installer is extracted from the
+# release payload with oc, so it needs the pull secret, and the pull
+# secret needs an entry for the registry the payload is on. Nightlies
+# are on registry.ci.openshift.org; ci builds are on
+# quay-proxy.ci.openshift.org, which takes the same token under its own
+# hostname:
+#
+#   jq '.auths["quay-proxy.ci.openshift.org"] = .auths["registry.ci.openshift.org"]' \
+#       ~/.secrets/pull-secret.json > /tmp/ps && mv /tmp/ps ~/.secrets/pull-secret.json
+#
+# The cluster pulls its images from the same registry, so the entry has
+# to be in the pull secret that goes into install-config.yaml too, not
+# just the one this script reads. They are the same file by default.
 #
 # No aws- prefix: openshift-install is the same binary whichever cloud
 # you point it at, so prefixing it would make the convention decoration
@@ -19,6 +39,8 @@
 #
 #   OCP_CHANNEL   default stable-4.22
 #   OCP_VERSION   exact version, overrides the channel lookup
+#   OCP_RELEASE   release controller stream or build, overrides both
+#   PULL_SECRET   default ~/.secrets/pull-secret.json, OCP_RELEASE only
 #   BIN_DIR       default bin/ in this repo
 #   ARCH          default from uname, mapped to the mirror's naming
 
@@ -46,14 +68,53 @@ channel="${OCP_CHANNEL:-stable-4.22}"
 bin_dir="${BIN_DIR:-$here/bin}"
 
 case "${ARCH:-$(uname -m)}" in
-    x86_64|amd64)  arch=x86_64 ;;
-    aarch64|arm64) arch=aarch64 ;;
+    x86_64|amd64)  arch=x86_64;  rc_arch=amd64 ;;
+    aarch64|arm64) arch=aarch64; rc_arch=arm64 ;;
     *) die "unsupported architecture: $(uname -m)" ;;
 esac
 
 base="https://mirror.openshift.com/pub/openshift-v4/${arch}/clients/ocp"
+release_controller="https://${rc_arch}.ocp.releases.ci.openshift.org/api/v1/releasestream"
 
-if [ -n "${OCP_VERSION:-}" ]; then
+# Two sources. The mirror serves a tarball at a URL; the release
+# controller names a payload image the installer is extracted from.
+# Exactly one of url and pull_spec is set below.
+url=
+pull_spec=
+
+if [ -n "${OCP_RELEASE:-}" ]; then
+    require_cmd oc jq
+    pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
+    [ -f "$pull_secret" ] || die "no pull secret at $pull_secret" \
+        "OCP_RELEASE extracts the installer from the payload, which needs one. Set PULL_SECRET."
+
+    # A build name is its stream plus -YYYY-MM-DD-HHMMSS. Stripping
+    # that suffix gives the stream; a bare stream has nothing to strip.
+    release="$OCP_RELEASE"
+    stream="${release%-*-*-*-*}"
+    if [ "$stream" = "$release" ]; then
+        [ "$print_version_only" = true ] || info "Resolving latest accepted build in $stream..."
+        build="$(curl -sSL --fail --max-time 60 "$release_controller/$stream/latest")" \
+            || die "no stream $stream on the release controller" \
+                   "Streams look like 4.23.0-0.nightly or 4.23.0-0.ci."
+    else
+        build="$(curl -sSL --fail --max-time 60 "$release_controller/$stream/tags" \
+            | jq -e --arg n "$release" '.tags[] | select(.name == $n)')" \
+            || die "no build $release in stream $stream" \
+                   "The release controller lists what exists: ${release_controller%/api/*}/#$stream"
+    fi
+    version="$(jq -r .name <<<"$build")"
+    pull_spec="$(jq -r .pullSpec <<<"$build")"
+    phase="$(jq -r .phase <<<"$build")"
+
+    # The oc error for a missing registry entry is an unhelpful
+    # "unauthorized", so name the fix here. The token is the same one
+    # registry.ci.openshift.org already has, under the other hostname.
+    registry="${pull_spec%%/*}"
+    jq -e --arg r "$registry" '.auths[$r]' "$pull_secret" >/dev/null \
+        || die "$pull_secret has no entry for $registry, which $version is pulled from" \
+               "Copy the registry.ci.openshift.org entry under that name; see the header of ${0##*/}."
+elif [ -n "${OCP_VERSION:-}" ]; then
     tarball="openshift-install-linux-${OCP_VERSION}.tar.gz"
     url="$base/${OCP_VERSION}/$tarball"
 else
@@ -70,8 +131,10 @@ else
     url="$base/$channel/$tarball"
 fi
 
-version="${tarball#openshift-install-linux-}"
-version="${version%.tar.gz}"
+if [ -n "$url" ]; then
+    version="${tarball#openshift-install-linux-}"
+    version="${version%.tar.gz}"
+fi
 
 # Just the answer, on stdout, nothing else. Callers use it in a
 # directory name, so any decoration would end up in the path.
@@ -94,7 +157,11 @@ if [ -x "$target" ] && [ "$("$target" version 2>/dev/null | head -1 | awk '{prin
 fi
 
 if [ "$dry_run" = true ]; then
-    info "  would download $url"
+    if [ -n "$pull_spec" ]; then
+        info "  would extract from $pull_spec ($phase)"
+    else
+        info "  would download $url"
+    fi
     info "  would install  $target"
     report
     exit $?
@@ -104,12 +171,19 @@ mkdir -p "$bin_dir"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-info "Downloading $version..."
-retry 3 5 curl -sSL --max-time 600 -o "$tmp/oi.tar.gz" "$url" \
-    || die "download failed: $url"
+if [ -n "$pull_spec" ]; then
+    info "Extracting $version ($phase) from $pull_spec..."
+    retry 3 5 oc adm release extract --registry-config="$pull_secret" \
+        --command=openshift-install --to="$tmp" "$pull_spec" \
+        || die "extract failed: $pull_spec"
+else
+    info "Downloading $version..."
+    retry 3 5 curl -sSL --max-time 600 -o "$tmp/oi.tar.gz" "$url" \
+        || die "download failed: $url"
 
-tar xzf "$tmp/oi.tar.gz" -C "$tmp" openshift-install \
-    || die "no openshift-install inside $tarball"
+    tar xzf "$tmp/oi.tar.gz" -C "$tmp" openshift-install \
+        || die "no openshift-install inside $tarball"
+fi
 
 install -m 755 "$tmp/openshift-install" "$target"
 

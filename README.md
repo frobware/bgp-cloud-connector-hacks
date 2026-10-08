@@ -156,6 +156,7 @@ the answer you almost always want.
 | `WORKER_REPLICAS` | `3` | Fewer workers |
 | `CONTROL_PLANE_TYPE`, `WORKER_TYPE` | `m6i.xlarge` | Bigger nodes; `m6i.metal` for virt |
 | `OCP_CHANNEL` | `stable-4.22` | A different release stream |
+| `OCP_RELEASE` | unset | A release controller build, such as `4.23.0-0.nightly` for the latest accepted nightly or `4.23.0-0.ci-2026-10-07-172611` for one build. Needs the registry in your pull secret; see the header of `get-openshift-install` |
 | `OPENSHIFT_INSTALL` | `<cluster>/bin/openshift-install` | Reuse a binary you already have |
 | `CCOCTL` | `<cluster>/bin/ccoctl` | As above |
 | `INSTALL_CONFIG` | generate one | You have a topology you want. The copy's `metadata.name` is rewritten to the generated cluster name; everything else is yours |
