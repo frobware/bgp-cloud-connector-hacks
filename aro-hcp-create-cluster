@@ -109,7 +109,10 @@ resolve_cluster_version || die "no enabled ARO HCP version ${ARO_HCP_VERSION:+ma
 cluster_dir="${CLUSTER:-$here/clusters/$short_name-aro-hcp-OCP-$cluster_version}"
 
 # ---------------------------------------------------------------------
-# The identities and their grants, straight from the demo's cluster.bicep.
+# The identities and their grants. Scopes follow Azure/ARO-HCP's
+# test/e2e-setup/bicep/modules/non-msi-scoped-assignments.bicep, which
+# the service's permission validation checks against; the demo's
+# cluster.bicep is behind it for file-csi-driver and image-registry.
 # ---------------------------------------------------------------------
 
 cp_operators=(cluster-api-azure control-plane cloud-controller-manager ingress
@@ -128,12 +131,14 @@ cp:control-plane            fc0c873f-45e9-4d0d-a7d1-585aab30c6ed nsg
 cp:cloud-controller-manager a1f96423-95ce-4224-ab27-4e3dc72facd4 subnet
 cp:cloud-controller-manager a1f96423-95ce-4224-ab27-4e3dc72facd4 nsg
 cp:ingress                  0336e1d3-7a87-462b-b6db-342b63f7802c subnet
-cp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e subnet
+cp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e vnet
 cp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e nsg
+cp:image-registry           8b32b316-c2f5-4ddf-b05b-83dacd2d08b5 vnet
 cp:cloud-network-config     be7a6435-15ae-4171-8f30-4a343eff9e8f subnet
 cp:cloud-network-config     be7a6435-15ae-4171-8f30-4a343eff9e8f vnet
-dp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e subnet
+dp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e vnet
 dp:file-csi-driver          0d7aedc0-15fd-4a67-a412-efad370c947e nsg
+dp:image-registry           8b32b316-c2f5-4ddf-b05b-83dacd2d08b5 vnet
 smi                         c0ff367d-66d8-445e-917c-583feb0ef0d4 vnet
 smi                         c0ff367d-66d8-445e-917c-583feb0ef0d4 nsg
 "
