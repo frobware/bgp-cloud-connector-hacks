@@ -385,6 +385,38 @@ node_pool_body() {
                    osDisk: {sizeGiB: 64, diskStorageAccountType: "StandardSSD_LRS"}}}}'
 }
 
+# Why a resource ended in Failed. ARM keeps the resource but not the
+# error: that is on the failed write's entry in the activity log, which
+# can take a minute or two to appear, hence the retries. Each error
+# detail goes on its own line, and the service's semicolon-joined
+# validation messages are split the same way.
+failure_reason() {
+    local id="$1" msg=""
+    for _ in $(seq 1 12); do
+        msg="$(az monitor activity-log list --resource-id "$id" --offset 6h --status Failed \
+            --query '[0].properties.statusMessage' -o tsv 2>/dev/null)" || msg=""
+        [ -n "$msg" ] && break
+        sleep 10
+    done
+    if [ -z "$msg" ]; then
+        printf 'the activity log has no failure recorded for %s yet\n' "$id"
+        return 0
+    fi
+    jq -r '.error | ((.details // []) | map(.code + ": " + .message) | .[]) // (.code + ": " + .message)' \
+        <<<"$msg" 2>/dev/null | sed 's/; /\n/g' | permission_lines || printf '%s\n' "$msg"
+}
+
+# The permission validation reports what is missing as a JSON array at
+# the end of a line; this spells each denied action out on its own.
+permission_lines() {
+    jq -Rr 'if test("required permissions: \\[") then
+        (capture("^(?<head>.*required permissions): (?<arr>\\[.*\\])$")
+         | .head, ((.arr | fromjson)[] | . as $p | $p.decisions[]
+             | select(.accessDecision != "Allowed")
+             | "    \($p.identity | split("/") | last) needs \(.actionId) on \($p.resource | split("/") | last)"))
+      else . end'
+}
+
 # Prints the provisioning state; a terminal failure is reported and
 # ends the wait rather than running out the clock.
 provisioned() {
@@ -395,7 +427,7 @@ provisioned() {
         Succeeded) info "  $state"; return 0 ;;
         Failed|Canceled)
             warn "  $state:"
-            explain "$(az rest --method GET --url "https://management.azure.com$1?api-version=$api" 2>&1 | head -40)"
+            explain "$(failure_reason "$1")"
             exit_wait=true; return 0 ;;
         *) info "  ${state:-no state yet}"; return 1 ;;
     esac
