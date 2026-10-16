@@ -1,0 +1,219 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1570 912" width="1570" height="912" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    :root { color-scheme: light dark; }
+    .bg    { fill: #ffffff; }
+    .title { fill: #14161a; font-size: 22px; font-weight: 700; }
+    .sub   { fill: #5b6470; font-size: 13px; }
+    .glbl  { fill: #14161a; font-size: 13px; font-weight: 700; }
+    .hd1   { fill: #14161a; font-size: 15px; font-weight: 700; }
+    .hd2   { fill: #5b6470; font-size: 12px; }
+    .rl    { fill: #14161a; font-size: 13px; font-weight: 600; }
+    .t     { fill: #14161a; font-size: 12px; }
+    .mono  { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .g-self    { fill: #eef4fb; stroke: #2f6fb0; stroke-width: 1.5; }
+    .g-classic { fill: #f6f1fb; stroke: #8b6bb1; stroke-width: 1.5; }
+    .g-hcp     { fill: #fdf6e6; stroke: #b8891f; stroke-width: 1.5; }
+    .head  { fill: #f4f7fb; stroke: #98a6b8; stroke-width: 1.2; }
+    .rlbox { fill: #fafbfc; stroke: #d5dbe3; stroke-width: 1; }
+    .c-n   { fill: #ffffff; stroke: #d5dbe3; stroke-width: 1; }
+    .c-ok  { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 1.5; }
+    .c-amb { fill: #fdf6e6; stroke: #b8891f; stroke-width: 1.5; }
+    .c-bad { fill: #fdf0ee; stroke: #b3341f; stroke-width: 1.5; }
+    .c-sec { fill: #f2f3f5; stroke: #7a828c; stroke-width: 1.5; }
+    .c-fed { fill: #eef4fb; stroke: #2f6fb0; stroke-width: 1.5; }
+    @media (prefers-color-scheme: dark) {
+      .bg    { fill: #14161a; }
+      .title, .glbl, .hd1, .rl, .t { fill: #e6e9ee; }
+      .sub, .hd2 { fill: #a3acb8; }
+      .g-self    { fill: #172435; stroke: #5b93d1; }
+      .g-classic { fill: #241c30; stroke: #a88cce; }
+      .g-hcp     { fill: #2c2414; stroke: #d4a63c; }
+      .head  { fill: #1d2129; stroke: #4a5361; }
+      .rlbox { fill: #191c22; stroke: #343b46; }
+      .c-n   { fill: #14161a; stroke: #343b46; }
+      .c-ok  { fill: #142a1d; stroke: #3fae72; }
+      .c-amb { fill: #2c2414; stroke: #d4a63c; }
+      .c-bad { fill: #321a16; stroke: #e0634c; }
+      .c-sec { fill: #1d2025; stroke: #8b939e; }
+      .c-fed { fill: #172435; stroke: #5b93d1; }
+    }
+  </style>
+  <rect class="bg" x="0" y="0" width="1570" height="912"/>
+  <text class="title" x="20" y="44">How the operator meets Azure: five flavours, and how each is tested</text>
+  <text class="sub" x="20" y="66">bgp-cloud-connector, 2026-10-16. Columns are cluster flavours; rows say who builds it, which identity the operator acts as, and where it is tested.</text>
+  <rect class="g-self" x="222" y="96" width="532" height="26" rx="5"/>
+  <text class="glbl" x="488.0" y="114" text-anchor="middle">Self-managed Azure (you run openshift-install)</text>
+  <rect class="g-classic" x="758" y="96" width="532" height="26" rx="5"/>
+  <text class="glbl" x="1024.0" y="114" text-anchor="middle">ARO classic (Microsoft runs it, control plane on VMs)</text>
+  <rect class="g-hcp" x="1294" y="96" width="264" height="26" rx="5"/>
+  <text class="glbl" x="1426.0" y="114" text-anchor="middle">ARO HCP (hosted control planes)</text>
+  <rect class="head" x="222" y="130" width="264" height="54" rx="5"/>
+  <text class="hd1" x="234" y="153">Azure IPI</text>
+  <text class="hd2" x="234" y="172">Passthrough (the default)</text>
+  <rect class="head" x="490" y="130" width="264" height="54" rx="5"/>
+  <text class="hd1" x="502" y="153">Azure IPI</text>
+  <text class="hd2" x="502" y="172">Manual + Workload ID (ccoctl)</text>
+  <rect class="head" x="758" y="130" width="264" height="54" rx="5"/>
+  <text class="hd1" x="770" y="153">ARO classic</text>
+  <text class="hd2" x="770" y="172">service principal</text>
+  <rect class="head" x="1026" y="130" width="264" height="54" rx="5"/>
+  <text class="hd1" x="1038" y="153">ARO classic</text>
+  <text class="hd2" x="1038" y="172">MIWI (managed identities)</text>
+  <rect class="head" x="1294" y="130" width="264" height="54" rx="5"/>
+  <text class="hd1" x="1306" y="153">ARO HCP</text>
+  <text class="hd2" x="1306" y="172">public service, int, or pers</text>
+  <rect class="rlbox" x="20" y="190" width="196" height="64" rx="5"/>
+  <text class="rl" x="30" y="212">Who builds it</text>
+  <rect class="c-n" x="222" y="190" width="264" height="64" rx="5"/>
+  <text class="t mono" x="234" y="210">openshift-install</text>
+  <rect class="c-n" x="490" y="190" width="264" height="64" rx="5"/>
+  <text class="t mono" x="502" y="210">ccoctl azure create-all</text>
+  <text class="t" x="502" y="226">makes an OIDC issuer and one identity</text>
+  <text class="t" x="502" y="242">per component, then openshift-install</text>
+  <rect class="c-n" x="758" y="190" width="264" height="64" rx="5"/>
+  <text class="t mono" x="770" y="210">az aro create</text>
+  <text class="t" x="770" y="226">with a cluster service principal</text>
+  <rect class="c-n" x="1026" y="190" width="264" height="64" rx="5"/>
+  <text class="t mono" x="1038" y="210">az aro create</text>
+  <text class="t" x="1038" y="226">with platform workload identities:</text>
+  <text class="t" x="1038" y="242">machine-api, cloud-network-config, ...</text>
+  <rect class="c-n" x="1294" y="190" width="264" height="64" rx="5"/>
+  <text class="t" x="1306" y="210">the ARO HCP service, through ARM:</text>
+  <text class="t" x="1306" y="226">cluster, then node pool;</text>
+  <text class="t" x="1306" y="242">thirteen managed identities</text>
+  <rect class="rlbox" x="20" y="258" width="196" height="48" rx="5"/>
+  <text class="rl" x="30" y="280">Kind of credential</text>
+  <rect class="c-sec" x="222" y="258" width="264" height="48" rx="5"/>
+  <text class="t" x="234" y="278">long-lived client secret,</text>
+  <text class="t" x="234" y="294">copied by CCO</text>
+  <rect class="c-fed" x="490" y="258" width="264" height="48" rx="5"/>
+  <text class="t" x="502" y="278">federated token for a</text>
+  <text class="t" x="502" y="294">managed identity (STS-like)</text>
+  <rect class="c-sec" x="758" y="258" width="264" height="48" rx="5"/>
+  <text class="t" x="770" y="278">long-lived client secret,</text>
+  <text class="t" x="770" y="294">the cluster principal, copied by CCO</text>
+  <rect class="c-fed" x="1026" y="258" width="264" height="48" rx="5"/>
+  <text class="t" x="1038" y="278">federated token for a</text>
+  <text class="t" x="1038" y="294">managed identity (STS-like)</text>
+  <rect class="c-fed" x="1294" y="258" width="264" height="48" rx="5"/>
+  <text class="t" x="1306" y="278">federated token for a</text>
+  <text class="t" x="1306" y="294">managed identity (STS-like)</text>
+  <rect class="rlbox" x="20" y="310" width="196" height="64" rx="5"/>
+  <text class="rl" x="30" y="332">Deny assignment on the NICs</text>
+  <rect class="c-ok" x="222" y="310" width="264" height="64" rx="5"/>
+  <text class="t" x="234" y="330">none</text>
+  <rect class="c-ok" x="490" y="310" width="264" height="64" rx="5"/>
+  <text class="t" x="502" y="330">none</text>
+  <rect class="c-amb" x="758" y="310" width="264" height="64" rx="5"/>
+  <text class="t" x="770" y="330">yes: exempts the cluster principal</text>
+  <text class="t" x="770" y="346">(which the operator carries)</text>
+  <rect class="c-bad" x="1026" y="310" width="264" height="64" rx="5"/>
+  <text class="t" x="1038" y="330">yes: exempts only the platform</text>
+  <text class="t" x="1038" y="346">identities and the ARO RP</text>
+  <rect class="c-bad" x="1294" y="310" width="264" height="64" rx="5"/>
+  <text class="t" x="1306" y="330">production: about twenty, per action</text>
+  <text class="t" x="1306" y="346">int (CI) and pers: none</text>
+  <rect class="rlbox" x="20" y="378" width="196" height="64" rx="5"/>
+  <text class="rl" x="30" y="400">Route Server calls as</text>
+  <rect class="c-n" x="222" y="378" width="264" height="64" rx="5"/>
+  <text class="t" x="234" y="398">the root service principal</text>
+  <rect class="c-n" x="490" y="378" width="264" height="64" rx="5"/>
+  <text class="t" x="502" y="398">the operator's own identity,</text>
+  <text class="t" x="502" y="414">which you create</text>
+  <rect class="c-n" x="758" y="378" width="264" height="64" rx="5"/>
+  <text class="t" x="770" y="398">the cluster principal, plus</text>
+  <text class="t" x="770" y="414">Network Contributor on your group</text>
+  <rect class="c-n" x="1026" y="378" width="264" height="64" rx="5"/>
+  <text class="t" x="1038" y="398">the operator's own identity,</text>
+  <text class="t" x="1038" y="414">Network Contributor on your group</text>
+  <rect class="c-n" x="1294" y="378" width="264" height="64" rx="5"/>
+  <text class="t" x="1306" y="398">the operator's own identity,</text>
+  <text class="t" x="1306" y="414">Network Contributor on the</text>
+  <text class="t" x="1306" y="430">customer group</text>
+  <rect class="rlbox" x="20" y="446" width="196" height="80" rx="5"/>
+  <text class="rl" x="30" y="468">NIC writes as</text>
+  <rect class="c-n" x="222" y="446" width="264" height="80" rx="5"/>
+  <text class="t" x="234" y="466">the root service principal</text>
+  <rect class="c-n" x="490" y="446" width="264" height="80" rx="5"/>
+  <text class="t" x="502" y="466">the operator's own identity</text>
+  <rect class="c-n" x="758" y="446" width="264" height="80" rx="5"/>
+  <text class="t" x="770" y="466">the cluster principal</text>
+  <rect class="c-bad" x="1026" y="446" width="264" height="80" rx="5"/>
+  <text class="t" x="1038" y="466">machine-api, BORROWED: named in</text>
+  <text class="t mono" x="1038" y="482">networkInterfaceClientID</text>
+  <text class="t" x="1038" y="498">plus a federated credential on it</text>
+  <text class="t" x="1038" y="514">trusting our ServiceAccount</text>
+  <rect class="c-amb" x="1294" y="446" width="264" height="80" rx="5"/>
+  <text class="t" x="1306" y="466">the operator's own identity, with</text>
+  <text class="t" x="1306" y="482">ARO Network Operator on the</text>
+  <text class="t" x="1306" y="498">managed group (#87151)</text>
+  <text class="t" x="1306" y="514">refused in production</text>
+  <rect class="rlbox" x="20" y="530" width="196" height="80" rx="5"/>
+  <text class="rl" x="30" y="552">CI job (openshift/release)</text>
+  <rect class="c-ok" x="222" y="530" width="264" height="80" rx="5"/>
+  <text class="t mono" x="234" y="550">e2e-azure-operator</text>
+  <text class="t" x="234" y="566">every PR, required</text>
+  <rect class="c-bad" x="490" y="530" width="264" height="80" rx="5"/>
+  <text class="t" x="502" y="550">NONE</text>
+  <text class="t" x="502" y="566">candidate chain:</text>
+  <text class="t mono" x="502" y="582">ipi-azure-pre-manual-oidc-</text>
+  <text class="t mono" x="502" y="598">workload-identity</text>
+  <rect class="c-amb" x="758" y="530" width="264" height="80" rx="5"/>
+  <text class="t mono" x="770" y="550">e2e-aro-classic-operator</text>
+  <text class="t" x="770" y="566">on request</text>
+  <rect class="c-amb" x="1026" y="530" width="264" height="80" rx="5"/>
+  <text class="t mono" x="1038" y="550">e2e-aro-classic-miwi-operator</text>
+  <text class="t" x="1038" y="566">on request, optional</text>
+  <rect class="c-amb" x="1294" y="530" width="264" height="80" rx="5"/>
+  <text class="t mono" x="1306" y="550">e2e-aro-hcp-operator</text>
+  <text class="t" x="1306" y="566">on request, optional,</text>
+  <text class="t" x="1306" y="582">int westus3, no deny assignments</text>
+  <rect class="rlbox" x="20" y="614" width="196" height="96" rx="5"/>
+  <text class="rl" x="30" y="636">By hand (hacks repo)</text>
+  <rect class="c-n" x="222" y="614" width="264" height="96" rx="5"/>
+  <text class="t mono" x="234" y="634">azure-create-cluster</text>
+  <rect class="c-n" x="490" y="614" width="264" height="96" rx="5"/>
+  <text class="t mono" x="502" y="634">azure-create-cluster</text>
+  <text class="t mono" x="502" y="650">AZURE_CREDENTIALS_MODE=Manual</text>
+  <rect class="c-n" x="758" y="614" width="264" height="96" rx="5"/>
+  <text class="t mono" x="770" y="634">aro-create-cluster</text>
+  <text class="t mono" x="770" y="650">ARO_IDENTITY=service-principal</text>
+  <rect class="c-n" x="1026" y="614" width="264" height="96" rx="5"/>
+  <text class="t mono" x="1038" y="634">aro-create-cluster</text>
+  <text class="t" x="1038" y="650">(managed is the default)</text>
+  <rect class="c-n" x="1294" y="614" width="264" height="96" rx="5"/>
+  <text class="t mono" x="1306" y="634">aro-hcp-create-cluster</text>
+  <text class="t" x="1306" y="650">public service, QE subscription,</text>
+  <text class="t" x="1306" y="666">uksouth, real deny assignments</text>
+  <text class="t" x="1306" y="682">pers: personal DEV environment,</text>
+  <text class="t" x="1306" y="698">own service, no deny assignments</text>
+  <rect class="rlbox" x="20" y="714" width="196" height="64" rx="5"/>
+  <text class="rl" x="30" y="736">Open question</text>
+  <rect class="c-n" x="222" y="714" width="264" height="64" rx="5"/>
+  <text class="t" x="234" y="734">-</text>
+  <rect class="c-bad" x="490" y="714" width="264" height="64" rx="5"/>
+  <text class="t" x="502" y="734">no CI coverage: the flavour</text>
+  <text class="t" x="502" y="750">closest to ROSA STS</text>
+  <rect class="c-n" x="758" y="714" width="264" height="64" rx="5"/>
+  <text class="t" x="770" y="734">out of the hot path for 1.1</text>
+  <rect class="c-bad" x="1026" y="714" width="264" height="64" rx="5"/>
+  <text class="t" x="1038" y="734">does ARO allow, and keep, our</text>
+  <text class="t" x="1038" y="750">federated credential on machine-api?</text>
+  <rect class="c-bad" x="1294" y="714" width="264" height="64" rx="5"/>
+  <text class="t" x="1306" y="734">needs ARO: a deny-assignment change</text>
+  <text class="t" x="1306" y="750">or an install-time operator identity;</text>
+  <text class="t" x="1306" y="766">hypershift#9966 not in the HCP API</text>
+  <rect class="c-ok" x="20" y="800" width="18" height="14" rx="3"/>
+  <text class="t" x="44" y="812">covered, or nothing in the way</text>
+  <rect class="c-amb" x="262.0" y="800" width="18" height="14" rx="3"/>
+  <text class="t" x="286.0" y="812">partial: on request, or works only without production's deny assignments</text>
+  <rect class="c-bad" x="772.8" y="800" width="18" height="14" rx="3"/>
+  <text class="t" x="796.8" y="812">gap, borrowed identity, or blocked on ARO</text>
+  <rect class="c-sec" x="1085.2" y="800" width="18" height="14" rx="3"/>
+  <text class="t" x="1109.2" y="812">long-lived secret</text>
+  <rect class="c-fed" x="1244.0" y="800" width="18" height="14" rx="3"/>
+  <text class="t" x="1268.0" y="812">federated token (STS-like)</text>
+  <text class="sub" x="20" y="844">MIWI's cloud-network-config platform identity holds the built-in role Azure Red Hat OpenShift Network Operator (be7a6435-...), the role #87151 gives the operator on ARO HCP's managed group.</text>
+  <text class="sub" x="20" y="864">Not ARO HCP: HyperShift on AKS (cluster_profile hypershift-aks) has no deny assignments, so nothing it shows transfers to the product.</text>
+  <text class="sub" x="20" y="884">Not checked: that e2e-azure-operator's cluster runs CCO in passthrough; it is the documented Azure default.</text>
+</svg>
