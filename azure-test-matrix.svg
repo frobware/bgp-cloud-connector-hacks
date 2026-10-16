@@ -163,8 +163,9 @@
   <text class="t" x="770" y="566">runs on every PR; required</text>
   <rect class="c-amb" x="1026" y="530" width="264" height="80" rx="5"/>
   <text class="t mono" x="1038" y="550">e2e-aro-classic-miwi-operator</text>
-  <text class="t" x="1038" y="566">runs on every PR; optional,</text>
-  <text class="t" x="1038" y="582">so a failure does not block merge</text>
+  <text class="t" x="1038" y="566">runs on every PR; optional</text>
+  <text class="t" x="1038" y="582">(openshift/release#87202 would</text>
+  <text class="t" x="1038" y="598">require it)</text>
   <rect class="c-amb" x="1294" y="530" width="264" height="80" rx="5"/>
   <text class="t mono" x="1306" y="550">e2e-aro-hcp-operator</text>
   <text class="t" x="1306" y="566">runs on every PR; optional</text>
