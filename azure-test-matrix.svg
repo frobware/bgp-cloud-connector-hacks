@@ -146,28 +146,30 @@
   <rect class="c-amb" x="1294" y="446" width="264" height="80" rx="5"/>
   <text class="t" x="1306" y="466">the operator's own identity, with</text>
   <text class="t" x="1306" y="482">ARO Network Operator on the</text>
-  <text class="t" x="1306" y="498">managed group (#87151)</text>
+  <text class="t" x="1306" y="498">managed group (release#87151)</text>
   <text class="t" x="1306" y="514">refused in production</text>
   <rect class="rlbox" x="20" y="530" width="196" height="80" rx="5"/>
   <text class="rl" x="30" y="552">CI job (openshift/release)</text>
   <rect class="c-ok" x="222" y="530" width="264" height="80" rx="5"/>
   <text class="t mono" x="234" y="550">e2e-azure-operator</text>
-  <text class="t" x="234" y="566">every PR, required</text>
+  <text class="t" x="234" y="566">runs on every PR; required</text>
   <rect class="c-bad" x="490" y="530" width="264" height="80" rx="5"/>
   <text class="t" x="502" y="550">NONE</text>
   <text class="t" x="502" y="566">candidate chain:</text>
   <text class="t mono" x="502" y="582">ipi-azure-pre-manual-oidc-</text>
   <text class="t mono" x="502" y="598">workload-identity</text>
-  <rect class="c-amb" x="758" y="530" width="264" height="80" rx="5"/>
+  <rect class="c-ok" x="758" y="530" width="264" height="80" rx="5"/>
   <text class="t mono" x="770" y="550">e2e-aro-classic-operator</text>
-  <text class="t" x="770" y="566">on request</text>
+  <text class="t" x="770" y="566">runs on every PR; required</text>
   <rect class="c-amb" x="1026" y="530" width="264" height="80" rx="5"/>
   <text class="t mono" x="1038" y="550">e2e-aro-classic-miwi-operator</text>
-  <text class="t" x="1038" y="566">on request, optional</text>
+  <text class="t" x="1038" y="566">runs on every PR; optional,</text>
+  <text class="t" x="1038" y="582">so a failure does not block merge</text>
   <rect class="c-amb" x="1294" y="530" width="264" height="80" rx="5"/>
   <text class="t mono" x="1306" y="550">e2e-aro-hcp-operator</text>
-  <text class="t" x="1306" y="566">on request, optional,</text>
-  <text class="t" x="1306" y="582">int westus3, no deny assignments</text>
+  <text class="t" x="1306" y="566">runs on every PR; optional</text>
+  <text class="t" x="1306" y="582">(openshift/release#87197 would</text>
+  <text class="t" x="1306" y="598">require it); int, no deny assignments</text>
   <rect class="rlbox" x="20" y="614" width="196" height="96" rx="5"/>
   <text class="rl" x="30" y="636">By hand (hacks repo)</text>
   <rect class="c-n" x="222" y="614" width="264" height="96" rx="5"/>
@@ -206,14 +208,14 @@
   <rect class="c-ok" x="20" y="800" width="18" height="14" rx="3"/>
   <text class="t" x="44" y="812">covered, or nothing in the way</text>
   <rect class="c-amb" x="262.0" y="800" width="18" height="14" rx="3"/>
-  <text class="t" x="286.0" y="812">partial: on request, or works only without production's deny assignments</text>
-  <rect class="c-bad" x="772.8" y="800" width="18" height="14" rx="3"/>
-  <text class="t" x="796.8" y="812">gap, borrowed identity, or blocked on ARO</text>
-  <rect class="c-sec" x="1085.2" y="800" width="18" height="14" rx="3"/>
-  <text class="t" x="1109.2" y="812">long-lived secret</text>
-  <rect class="c-fed" x="1244.0" y="800" width="18" height="14" rx="3"/>
-  <text class="t" x="1268.0" y="812">federated token (STS-like)</text>
-  <text class="sub" x="20" y="844">MIWI's cloud-network-config platform identity holds the built-in role Azure Red Hat OpenShift Network Operator (be7a6435-...), the role #87151 gives the operator on ARO HCP's managed group.</text>
+  <text class="t" x="286.0" y="812">partial: runs but optional, or works only without production's deny assignments</text>
+  <rect class="c-bad" x="817.6" y="800" width="18" height="14" rx="3"/>
+  <text class="t" x="841.6" y="812">gap, borrowed identity, or blocked on ARO</text>
+  <rect class="c-sec" x="1130.0" y="800" width="18" height="14" rx="3"/>
+  <text class="t" x="1154.0" y="812">long-lived secret</text>
+  <rect class="c-fed" x="1288.8" y="800" width="18" height="14" rx="3"/>
+  <text class="t" x="1312.8" y="812">federated token (STS-like)</text>
+  <text class="sub" x="20" y="844">The MIWI job grants the cloud-network-config platform identity the built-in role Azure Red Hat OpenShift Network Operator (be7a6435-...) on the vnet: the role openshift/release#87151 gives the operator on ARO HCP's managed group.</text>
   <text class="sub" x="20" y="864">Not ARO HCP: HyperShift on AKS (cluster_profile hypershift-aks) has no deny assignments, so nothing it shows transfers to the product.</text>
-  <text class="sub" x="20" y="884">Not checked: that e2e-azure-operator's cluster runs CCO in passthrough; it is the documented Azure default.</text>
+  <text class="sub" x="20" y="884">"Runs on every PR" excludes PRs that change only docs and metadata (skip_if_only_changed). Not checked: that e2e-azure-operator's cluster runs CCO in passthrough; it is the documented Azure default.</text>
 </svg>
