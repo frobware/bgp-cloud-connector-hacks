@@ -433,12 +433,32 @@ provisioned() {
     esac
 }
 
+# The PUT, repeated while the service says it is the one at fault.
+# Observed 2026-10-19: the node pool PUT came back Service Unavailable,
+# ServerTimeout, with nothing created, and the same body sent again a
+# few minutes later was accepted. Anything else is the request's fault
+# and is reported at once.
+put_resource() {
+    local id="$1" file="$2" out attempt
+    for attempt in 1 2 3 4 5 6; do
+        capture out az rest --method PUT --url "https://management.azure.com$id?api-version=$api" \
+            --body "@$file" --output none && return 0
+        if ! grep -qE 'Service Unavailable|ServerTimeout|Bad Gateway|Gateway Timeout|InternalServerError' <<<"$out"; then
+            explain "$out"
+            return 1
+        fi
+        warn "  attempt $attempt/6: the service did not answer, retrying in 60s"
+        sleep 60
+    done
+    explain "$out"
+    return 1
+}
+
 exit_wait=false
 put_and_wait() {
     local id="$1" body="$2" timeout="$3" what="$4"
     printf '%s' "$body" > "$cluster_dir/$what.json"
-    az rest --method PUT --url "https://management.azure.com$id?api-version=$api" \
-        --body "@$cluster_dir/$what.json" --output none || return 1
+    put_resource "$id" "$cluster_dir/$what.json" || return 1
     exit_wait=false
     wait_until "$timeout" 30 "the $what to provision" provisioned "$id" || return 1
     [ "$exit_wait" = false ]
