@@ -70,6 +70,8 @@
 !bgp-proof-gcp.png
 !aro-identities.svg
 !azure-test-matrix.svg
+!aro-classic-service-principal.svg
+!aro-hcp.svg
 
 
 # Re-denied after the allowances above, because the last matching rule

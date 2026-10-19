@@ -1,0 +1,186 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1520 850" width="1520" height="850" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    :root { color-scheme: light dark; }
+    .bg    { fill: #ffffff; }
+    .title { fill: #14161a; font-size: 22px; font-weight: 700; }
+    .sub   { fill: #5b6470; font-size: 13px; }
+    .h     { fill: #14161a; font-size: 14px; font-weight: 700; }
+    .ch    { fill: #14161a; font-size: 13px; font-weight: 700; }
+    .t     { fill: #14161a; font-size: 12px; }
+    .ts    { fill: #14161a; font-size: 12.5px; }
+    .tb    { fill: #14161a; font-size: 12.5px; font-weight: 700; }
+    .mono  { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .badge { fill: #14161a; }
+    .bt    { fill: #ffffff; font-size: 12px; font-weight: 700; }
+    .arrow { stroke: #5b6470; stroke-width: 1.6; fill: none; }
+    .ah    { fill: #5b6470; }
+    .r-ten { fill: #f4f7fb; stroke: #98a6b8; stroke-width: 1.2; }
+    .r-you { fill: #eef4fb; stroke: #2f6fb0; stroke-width: 1.5; }
+    .r-man { fill: #fdf6e6; stroke: #b8891f; stroke-width: 1.5; }
+    .r-cl  { fill: #f6f1fb; stroke: #8b6bb1; stroke-width: 1.5; }
+    .r-pan { fill: #fafbfc; stroke: #d5dbe3; stroke-width: 1; }
+    .c-n   { fill: #ffffff; stroke: #d5dbe3; stroke-width: 1; }
+    .c-ok  { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 1.5; }
+    .c-amb { fill: #fdf6e6; stroke: #b8891f; stroke-width: 1.5; }
+    .c-bad { fill: #fdf0ee; stroke: #b3341f; stroke-width: 1.5; }
+    @media (prefers-color-scheme: dark) {
+      .bg    { fill: #14161a; }
+      .title, .h, .ch, .t, .ts, .tb { fill: #e6e9ee; }
+      .sub   { fill: #a3acb8; }
+      .badge { fill: #e6e9ee; }
+      .bt    { fill: #14161a; }
+      .arrow { stroke: #a3acb8; }
+      .ah    { fill: #a3acb8; }
+      .r-ten { fill: #1d2129; stroke: #4a5361; }
+      .r-you { fill: #172435; stroke: #5b93d1; }
+      .r-man { fill: #2c2414; stroke: #d4a63c; }
+      .r-cl  { fill: #241c30; stroke: #a88cce; }
+      .r-pan { fill: #191c22; stroke: #343b46; }
+      .c-n   { fill: #14161a; stroke: #343b46; }
+      .c-ok  { fill: #142a1d; stroke: #3fae72; }
+      .c-amb { fill: #2c2414; stroke: #d4a63c; }
+      .c-bad { fill: #321a16; stroke: #e0634c; }
+    }
+  </style>
+  <rect class="bg" x="0" y="0" width="1520" height="850"/>
+  <text class="title" x="20" y="40">ARO classic with a service principal: who lets the operator write the NICs</text>
+  <text class="sub" x="20" y="62">One identity, the cluster service principal, is shared by every Azure component in the cluster, and the operator is given a copy of it.</text>
+  <text class="sub" x="20" y="80">A service principal is a non-human identity in Entra ID that logs in with a client id and a long-lived client secret.</text>
+  <rect class="r-ten" x="20" y="110" width="900" height="190" rx="8"/>
+  <text class="h" x="34" y="132">Entra ID tenant: the identities</text>
+  <text class="sub" x="34" y="150">None of these lives in a resource group.</text>
+  <rect class="c-ok" x="36" y="164" width="290" height="122" rx="6"/>
+  <text class="ch" x="48" y="184">Cluster service principal</text>
+  <text class="t mono" x="48" y="202">aro-&lt;cluster&gt;</text>
+  <text class="t" x="48" y="218">an app registration with a client</text>
+  <text class="t" x="48" y="234">secret, and its service principal.</text>
+  <text class="t" x="48" y="250">The one identity the deny exempts.</text>
+  <circle class="badge" cx="310" cy="180" r="10"/>
+  <text class="bt" x="310" y="184" text-anchor="middle">1</text>
+  <rect class="c-n" x="340" y="164" width="280" height="122" rx="6"/>
+  <text class="ch" x="352" y="184">ARO resource provider</text>
+  <text class="t" x="352" y="202">Microsoft's own service principal.</text>
+  <text class="t" x="352" y="218">Builds and runs the managed</text>
+  <text class="t" x="352" y="234">group; puts up its deny assignment.</text>
+  <circle class="badge" cx="604" cy="180" r="10"/>
+  <text class="bt" x="604" y="184" text-anchor="middle">2</text>
+  <rect class="c-bad" x="634" y="164" width="270" height="122" rx="6"/>
+  <text class="ch" x="646" y="184">You (and every other identity)</text>
+  <text class="t" x="646" y="202">Owner on the subscription.</text>
+  <text class="t" x="646" y="218">Denied in the managed group all</text>
+  <text class="t" x="646" y="234">the same: Owner does not help.</text>
+  <rect class="r-you" x="20" y="320" width="440" height="300" rx="8"/>
+  <text class="h" x="34" y="342">Your resource group</text>
+  <text class="sub" x="34" y="360">Yours; no deny assignment.</text>
+  <rect class="c-n" x="36" y="376" width="408" height="104" rx="6"/>
+  <text class="ch" x="48" y="396">vnet: master and worker subnets</text>
+  <text class="t" x="48" y="414">The NICs sit in these subnets.</text>
+  <text class="t" x="48" y="430">Network Contributor for the cluster</text>
+  <text class="t" x="48" y="446">principal, from az aro create: covers the</text>
+  <text class="t" x="48" y="462">subnet join a NIC write also needs.</text>
+  <circle class="badge" cx="428" cy="392" r="10"/>
+  <text class="bt" x="428" y="396" text-anchor="middle">2</text>
+  <rect class="c-ok" x="36" y="492" width="408" height="112" rx="6"/>
+  <text class="ch" x="48" y="512">Route Server</text>
+  <text class="t" x="48" y="530">Network Contributor for the cluster</text>
+  <text class="t" x="48" y="546">principal, granted by you for the operator.</text>
+  <text class="t" x="48" y="562">Today on the group; openshift/release#87240</text>
+  <text class="t" x="48" y="578">narrows CI's grant to the Route Server.</text>
+  <circle class="badge" cx="428" cy="508" r="10"/>
+  <text class="bt" x="428" y="512" text-anchor="middle">5</text>
+  <rect class="r-man" x="480" y="320" width="440" height="300" rx="8"/>
+  <text class="h" x="494" y="342">Managed resource group aro-&lt;cluster&gt;</text>
+  <text class="sub" x="494" y="360">ARO's. Holds the masters and workers.</text>
+  <rect class="c-bad" x="496" y="376" width="408" height="70" rx="6"/>
+  <text class="ch" x="508" y="396">Deny assignment</text>
+  <text class="t" x="508" y="414">*/write, */delete, */action: refused to</text>
+  <text class="t" x="508" y="430">everyone except the cluster principal.</text>
+  <circle class="badge" cx="888" cy="392" r="10"/>
+  <text class="bt" x="888" y="396" text-anchor="middle">2</text>
+  <rect class="c-ok" x="496" y="456" width="408" height="70" rx="6"/>
+  <text class="ch" x="508" y="476">Contributor for the cluster principal</text>
+  <text class="t" x="508" y="494">From the resource provider. Covers the</text>
+  <text class="t" x="508" y="510">NIC write and the backend pool join.</text>
+  <circle class="badge" cx="888" cy="472" r="10"/>
+  <text class="bt" x="888" y="476" text-anchor="middle">2</text>
+  <rect class="c-n" x="496" y="536" width="408" height="70" rx="6"/>
+  <text class="ch" x="508" y="556">VMs, load balancers, NICs</text>
+  <text class="t mono" x="508" y="574">enableIPForwarding = true</text>
+  <text class="t" x="508" y="590">on each router node's NIC: the write.</text>
+  <circle class="badge" cx="888" cy="552" r="10"/>
+  <text class="bt" x="888" y="556" text-anchor="middle">6</text>
+  <rect class="r-cl" x="20" y="640" width="900" height="170" rx="8"/>
+  <text class="h" x="34" y="662">Inside the cluster</text>
+  <text class="sub" x="34" y="680">OpenShift on the VMs above.</text>
+  <rect class="c-n" x="36" y="696" width="260" height="98" rx="6"/>
+  <text class="ch" x="48" y="716">kube-system/azure-credentials</text>
+  <text class="t" x="48" y="734">The cluster principal's client</text>
+  <text class="t" x="48" y="750">id and secret, put there when</text>
+  <text class="t" x="48" y="766">the cluster is built.</text>
+  <circle class="badge" cx="280" cy="712" r="10"/>
+  <text class="bt" x="280" y="716" text-anchor="middle">3</text>
+  <rect class="c-n" x="336" y="696" width="260" height="98" rx="6"/>
+  <text class="ch" x="348" y="716">CCO, passthrough mode</text>
+  <text class="t" x="348" y="734">Copies that one secret to every</text>
+  <text class="t" x="348" y="750">component that files a</text>
+  <text class="t" x="348" y="766">CredentialsRequest.</text>
+  <circle class="badge" cx="580" cy="712" r="10"/>
+  <text class="bt" x="580" y="716" text-anchor="middle">4</text>
+  <rect class="c-ok" x="636" y="696" width="268" height="98" rx="6"/>
+  <text class="ch" x="648" y="716">bgp-cloud-connector</text>
+  <text class="t" x="648" y="734">Its Secret holds the same id and</text>
+  <text class="t" x="648" y="750">secret, so it acts as the cluster</text>
+  <text class="t" x="648" y="766">principal for both writes.</text>
+  <circle class="badge" cx="888" cy="712" r="10"/>
+  <text class="bt" x="888" y="716" text-anchor="middle">6</text>
+  <line class="arrow" x1="296" y1="745" x2="329" y2="745"/>
+  <polygon class="ah" points="336,745 328,740 328,750"/>
+  <line class="arrow" x1="596" y1="745" x2="629" y2="745"/>
+  <polygon class="ah" points="636,745 628,740 628,750"/>
+  <rect class="r-pan" x="940" y="110" width="560" height="700" rx="8"/>
+  <text class="h" x="954" y="132">Who allows the NIC write, step by step</text>
+  <circle class="badge" cx="966" cy="162" r="10"/>
+  <text class="bt" x="966" y="166" text-anchor="middle">1</text>
+  <text class="tb" x="984" y="166">You run az aro create.</text>
+  <text class="ts" x="984" y="184">It registers the cluster service principal (or uses one you</text>
+  <text class="ts" x="984" y="200">name with --client-id and --client-secret).</text>
+  <circle class="badge" cx="966" cy="226" r="10"/>
+  <text class="bt" x="966" y="230" text-anchor="middle">2</text>
+  <text class="tb" x="984" y="230">The ARO resource provider builds the managed group.</text>
+  <text class="ts" x="984" y="248">It gives the cluster principal Contributor there, and puts up</text>
+  <text class="ts" x="984" y="264">the deny assignment that refuses everyone else. az aro create</text>
+  <text class="ts" x="984" y="280">also gives it Network Contributor on your vnet.</text>
+  <circle class="badge" cx="966" cy="306" r="10"/>
+  <text class="bt" x="966" y="310" text-anchor="middle">3</text>
+  <text class="tb" x="984" y="310">ARO hands the cluster its own credential.</text>
+  <text class="ts" x="984" y="328">The principal's client id and secret go into</text>
+  <text class="ts" x="984" y="344">kube-system/azure-credentials.</text>
+  <circle class="badge" cx="966" cy="370" r="10"/>
+  <text class="bt" x="966" y="374" text-anchor="middle">4</text>
+  <text class="tb" x="984" y="374">You install the operator; CCO copies the credential.</text>
+  <text class="ts" x="984" y="392">Its CredentialsRequest is served in passthrough mode: the</text>
+  <text class="ts" x="984" y="408">operator gets a copy of the cluster principal's secret.</text>
+  <circle class="badge" cx="966" cy="434" r="10"/>
+  <text class="bt" x="966" y="438" text-anchor="middle">5</text>
+  <text class="tb" x="984" y="438">You grant the Route Server role.</text>
+  <text class="ts" x="984" y="456">Network Contributor for the cluster principal on the Route</text>
+  <text class="ts" x="984" y="472">Server's group. The only grant made for the operator.</text>
+  <circle class="badge" cx="966" cy="498" r="10"/>
+  <text class="bt" x="966" y="502" text-anchor="middle">6</text>
+  <text class="tb" x="984" y="502">The operator turns on IP forwarding.</text>
+  <text class="ts" x="984" y="520">As the cluster principal: Contributor allows the write, and</text>
+  <text class="ts" x="984" y="536">the deny assignment exempts it.</text>
+  <rect class="c-amb" x="956" y="570" width="528" height="152" rx="6"/>
+  <text class="ch" x="968" y="590">So who allows it?</text>
+  <text class="t" x="968" y="608">Nobody grants the NIC write to the operator. ARO allows the</text>
+  <text class="t" x="968" y="624">cluster principal at step 2, for the cluster's own components;</text>
+  <text class="t" x="968" y="640">passthrough at step 4 makes the operator that principal too.</text>
+  <text class="t" x="968" y="656">Open with ARO: whether that is within their support policy,</text>
+  <text class="t" x="968" y="672">"Don't circumvent the deny assignment ... or perform</text>
+  <text class="t" x="968" y="688">administrative tasks normally prohibited by the deny assignment".</text>
+  <rect class="c-ok" x="956" y="734" width="528" height="70" rx="6"/>
+  <text class="ch" x="968" y="754">1.1: yes</text>
+  <text class="t" x="968" y="772">Works now; e2e-aro-classic-operator, a required, gating job.</text>
+  <text class="t" x="968" y="788">ARO has not yet confirmed it is supported.</text>
+  <text class="sub" x="20" y="836">Sources: role and deny assignments read off a live cluster on 2026-09-24; the ARO support policy (learn.microsoft.com/azure/openshift/support-policies-v4), read 2026-10-19.</text>
+</svg>

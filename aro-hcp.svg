@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1520 866" width="1520" height="866" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    :root { color-scheme: light dark; }
+    .bg    { fill: #ffffff; }
+    .title { fill: #14161a; font-size: 22px; font-weight: 700; }
+    .sub   { fill: #5b6470; font-size: 13px; }
+    .h     { fill: #14161a; font-size: 14px; font-weight: 700; }
+    .ch    { fill: #14161a; font-size: 13px; font-weight: 700; }
+    .t     { fill: #14161a; font-size: 12px; }
+    .ts    { fill: #14161a; font-size: 12.5px; }
+    .tb    { fill: #14161a; font-size: 12.5px; font-weight: 700; }
+    .mono  { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .badge { fill: #14161a; }
+    .bt    { fill: #ffffff; font-size: 12px; font-weight: 700; }
+    .arrow { stroke: #5b6470; stroke-width: 1.6; fill: none; }
+    .ah    { fill: #5b6470; }
+    .r-ten { fill: #f4f7fb; stroke: #98a6b8; stroke-width: 1.2; }
+    .r-you { fill: #eef4fb; stroke: #2f6fb0; stroke-width: 1.5; }
+    .r-man { fill: #fdf6e6; stroke: #b8891f; stroke-width: 1.5; }
+    .r-cl  { fill: #f6f1fb; stroke: #8b6bb1; stroke-width: 1.5; }
+    .r-pan { fill: #fafbfc; stroke: #d5dbe3; stroke-width: 1; }
+    .c-n   { fill: #ffffff; stroke: #d5dbe3; stroke-width: 1; }
+    .c-ok  { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 1.5; }
+    .c-amb { fill: #fdf6e6; stroke: #b8891f; stroke-width: 1.5; }
+    .c-bad { fill: #fdf0ee; stroke: #b3341f; stroke-width: 1.5; }
+    @media (prefers-color-scheme: dark) {
+      .bg    { fill: #14161a; }
+      .title, .h, .ch, .t, .ts, .tb { fill: #e6e9ee; }
+      .sub   { fill: #a3acb8; }
+      .badge { fill: #e6e9ee; }
+      .bt    { fill: #14161a; }
+      .arrow { stroke: #a3acb8; }
+      .ah    { fill: #a3acb8; }
+      .r-ten { fill: #1d2129; stroke: #4a5361; }
+      .r-you { fill: #172435; stroke: #5b93d1; }
+      .r-man { fill: #2c2414; stroke: #d4a63c; }
+      .r-cl  { fill: #241c30; stroke: #a88cce; }
+      .r-pan { fill: #191c22; stroke: #343b46; }
+      .c-n   { fill: #14161a; stroke: #343b46; }
+      .c-ok  { fill: #142a1d; stroke: #3fae72; }
+      .c-amb { fill: #2c2414; stroke: #d4a63c; }
+      .c-bad { fill: #321a16; stroke: #e0634c; }
+    }
+  </style>
+  <rect class="bg" x="0" y="0" width="1520" height="866"/>
+  <text class="title" x="20" y="40">ARO HCP: who lets the operator write the NICs</text>
+  <text class="sub" x="20" y="62">Every component has its own managed identity, and so does the operator. The deny assignments exempt only the platform's.</text>
+  <text class="sub" x="20" y="80">A managed identity is a non-human identity in Entra ID with no secret: a pod gets its token by trading a signed ServiceAccount token (workload identity).</text>
+  <rect class="r-ten" x="20" y="110" width="900" height="206" rx="8"/>
+  <text class="h" x="34" y="132">Entra ID tenant: the identities</text>
+  <text class="sub" x="34" y="150">Each is a managed identity: no secret, reached by exchanging a ServiceAccount token.</text>
+  <rect class="c-ok" x="36" y="164" width="300" height="138" rx="6"/>
+  <text class="ch" x="48" y="184">Platform identities (13)</text>
+  <text class="t" x="48" y="202">One per component: cluster-api-azure,</text>
+  <text class="t" x="48" y="218">cloud-network-config, ingress, ...</text>
+  <text class="t" x="48" y="234">You create them; the cluster names</text>
+  <text class="t" x="48" y="250">them. The deny assignments exempt</text>
+  <text class="t" x="48" y="266">only these.</text>
+  <circle class="badge" cx="320" cy="180" r="10"/>
+  <text class="bt" x="320" y="184" text-anchor="middle">1</text>
+  <rect class="c-bad" x="350" y="164" width="280" height="138" rx="6"/>
+  <text class="ch" x="362" y="184">The operator's identity</text>
+  <text class="t" x="362" y="202">A managed identity you create, with</text>
+  <text class="t" x="362" y="218">a federated credential trusting the</text>
+  <text class="t" x="362" y="234">operator's ServiceAccount.</text>
+  <text class="t" x="362" y="250">Not exempt: the deny assignments</text>
+  <text class="t" x="362" y="266">refuse its NIC writes.</text>
+  <circle class="badge" cx="614" cy="180" r="10"/>
+  <text class="bt" x="614" y="184" text-anchor="middle">3</text>
+  <rect class="c-n" x="644" y="164" width="260" height="138" rx="6"/>
+  <text class="ch" x="656" y="184">ARO HCP resource provider</text>
+  <text class="t" x="656" y="202">Microsoft's service. Runs the</text>
+  <text class="t" x="656" y="218">control plane, builds the managed</text>
+  <text class="t" x="656" y="234">group, writes its deny</text>
+  <text class="t" x="656" y="250">assignments.</text>
+  <circle class="badge" cx="888" cy="180" r="10"/>
+  <text class="bt" x="888" y="184" text-anchor="middle">1</text>
+  <rect class="r-you" x="20" y="336" width="440" height="300" rx="8"/>
+  <text class="h" x="34" y="358">Your resource group</text>
+  <text class="sub" x="34" y="376">Yours; no deny assignment.</text>
+  <rect class="c-n" x="36" y="392" width="408" height="104" rx="6"/>
+  <text class="ch" x="48" y="412">vnet and node subnet</text>
+  <text class="t" x="48" y="430">The worker NICs sit in this subnet.</text>
+  <text class="t" x="48" y="446">A NIC write also needs the subnet join:</text>
+  <text class="t" x="48" y="462">Network Contributor on the subnet. Not</text>
+  <text class="t" x="48" y="478">needed if the operator only reads.</text>
+  <circle class="badge" cx="428" cy="408" r="10"/>
+  <text class="bt" x="428" y="412" text-anchor="middle">4</text>
+  <rect class="c-ok" x="36" y="508" width="408" height="112" rx="6"/>
+  <text class="ch" x="48" y="528">Route Server</text>
+  <text class="t" x="48" y="546">Network Contributor for the operator's</text>
+  <text class="t" x="48" y="562">identity, granted by you. Works today.</text>
+  <text class="t" x="48" y="578">openshift/release#87240 narrows CI's</text>
+  <text class="t" x="48" y="594">grant from the group to the Route Server.</text>
+  <circle class="badge" cx="428" cy="524" r="10"/>
+  <text class="bt" x="428" y="528" text-anchor="middle">4</text>
+  <rect class="r-man" x="480" y="336" width="440" height="300" rx="8"/>
+  <text class="h" x="494" y="358">Managed resource group aro-&lt;cluster&gt;</text>
+  <text class="sub" x="494" y="376">ARO's. Workers only: the control plane is in Microsoft's service.</text>
+  <rect class="c-bad" x="496" y="392" width="408" height="86" rx="6"/>
+  <text class="ch" x="508" y="412">Deny assignments: eighteen</text>
+  <text class="t" x="508" y="430">One per resource type. The NIC write and the</text>
+  <text class="t" x="508" y="446">backend pool join are refused to everyone</text>
+  <text class="t" x="508" y="462">but the platform identities.</text>
+  <circle class="badge" cx="888" cy="408" r="10"/>
+  <text class="bt" x="888" y="412" text-anchor="middle">1</text>
+  <rect class="c-n" x="496" y="488" width="408" height="62" rx="6"/>
+  <text class="ch" x="508" y="508">A role you grant the operator here</text>
+  <text class="t" x="508" y="526">Read for route A; ARO Network Operator for B.</text>
+  <text class="t" x="508" y="542">Allowed, but the deny still refuses writes.</text>
+  <circle class="badge" cx="888" cy="504" r="10"/>
+  <text class="bt" x="888" y="508" text-anchor="middle">4</text>
+  <rect class="c-n" x="496" y="560" width="408" height="62" rx="6"/>
+  <text class="ch" x="508" y="580">Worker VMs, load balancer, NICs</text>
+  <text class="t mono" x="508" y="598">enableIPForwarding = true</text>
+  <text class="t" x="508" y="614">on each router node's NIC.</text>
+  <circle class="badge" cx="888" cy="576" r="10"/>
+  <text class="bt" x="888" y="580" text-anchor="middle">5</text>
+  <rect class="r-cl" x="20" y="656" width="900" height="170" rx="8"/>
+  <text class="h" x="34" y="678">Inside the cluster</text>
+  <text class="sub" x="34" y="696">Hosted control plane in Microsoft's service; workers in your subscription.</text>
+  <rect class="c-n" x="36" y="712" width="260" height="98" rx="6"/>
+  <text class="ch" x="48" y="732">Operator's Subscription</text>
+  <text class="t" x="48" y="750">CLIENTID, TENANTID and</text>
+  <text class="t" x="48" y="766">SUBSCRIPTIONID name the</text>
+  <text class="t" x="48" y="782">operator's identity.</text>
+  <circle class="badge" cx="280" cy="728" r="10"/>
+  <text class="bt" x="280" y="732" text-anchor="middle">3</text>
+  <rect class="c-n" x="336" y="712" width="260" height="98" rx="6"/>
+  <text class="ch" x="348" y="732">Token exchange</text>
+  <text class="t" x="348" y="750">Entra ID trades the operator's</text>
+  <text class="t" x="348" y="766">ServiceAccount token for one for</text>
+  <text class="t" x="348" y="782">its own identity. No secret.</text>
+  <circle class="badge" cx="580" cy="728" r="10"/>
+  <text class="bt" x="580" y="732" text-anchor="middle">3</text>
+  <rect class="c-n" x="636" y="712" width="268" height="98" rx="6"/>
+  <text class="ch" x="648" y="732">cluster-api-azure (control plane)</text>
+  <text class="t" x="648" y="750">A platform identity. Creates the</text>
+  <text class="t" x="648" y="766">worker VMs and NICs; hypershift#9966</text>
+  <text class="t" x="648" y="782">lets it set forwarding as it does.</text>
+  <circle class="badge" cx="888" cy="728" r="10"/>
+  <text class="bt" x="888" y="732" text-anchor="middle">5</text>
+  <line class="arrow" x1="296" y1="761" x2="329" y2="761"/>
+  <polygon class="ah" points="336,761 328,756 328,766"/>
+  <rect class="r-pan" x="940" y="110" width="560" height="716" rx="8"/>
+  <text class="h" x="954" y="132">Who allows the NIC write, step by step</text>
+  <circle class="badge" cx="966" cy="162" r="10"/>
+  <text class="bt" x="966" y="166" text-anchor="middle">1</text>
+  <text class="tb" x="984" y="166">You create the platform identities and the cluster.</text>
+  <text class="ts" x="984" y="184">Through the ARO HCP API. The resource provider trusts each</text>
+  <text class="ts" x="984" y="200">identity for its component, and writes deny assignments on</text>
+  <text class="ts" x="984" y="216">the managed group that exempt only those identities.</text>
+  <circle class="badge" cx="966" cy="242" r="10"/>
+  <text class="bt" x="966" y="246" text-anchor="middle">2</text>
+  <text class="tb" x="984" y="246">You create a node pool.</text>
+  <text class="ts" x="984" y="264">cluster-api-azure builds the worker VMs and NICs there.</text>
+  <circle class="badge" cx="966" cy="290" r="10"/>
+  <text class="bt" x="966" y="294" text-anchor="middle">3</text>
+  <text class="tb" x="984" y="294">You install the operator and give it its own identity.</text>
+  <text class="ts" x="984" y="312">A federated credential trusts its ServiceAccount; the</text>
+  <text class="ts" x="984" y="328">Subscription names the identity to the operator.</text>
+  <circle class="badge" cx="966" cy="354" r="10"/>
+  <text class="bt" x="966" y="358" text-anchor="middle">4</text>
+  <text class="tb" x="984" y="358">You grant its roles.</text>
+  <text class="ts" x="984" y="376">Network Contributor on the Route Server, and a role on the</text>
+  <text class="ts" x="984" y="392">managed group for the NICs.</text>
+  <circle class="badge" cx="966" cy="418" r="10"/>
+  <text class="bt" x="966" y="422" text-anchor="middle">5</text>
+  <text class="tb" x="984" y="422">The NIC write: refused in production.</text>
+  <text class="ts" x="984" y="440">One of these has to happen, and each is ARO's to do:</text>
+  <text class="ts" x="984" y="456">A. Forwarding from the node pool: hypershift#9966 is merged</text>
+  <text class="ts" x="984" y="472">    but not yet in the ARO HCP API. cluster-api-azure sets</text>
+  <text class="ts" x="984" y="488">    forwarding when it makes the NIC; the operator only reads.</text>
+  <text class="ts" x="984" y="504">    No deny change. Shown on a personal DEV env, 2026-10-16.</text>
+  <text class="ts" x="984" y="520">B. ARO exempts the operator's identity for worker NIC writes.</text>
+  <text class="ts" x="984" y="536">C. ARO adds an install-time operator identity to the HCP API,</text>
+  <text class="ts" x="984" y="552">    as it does for KMS, and exempts it.</text>
+  <rect class="c-amb" x="956" y="586" width="528" height="136" rx="6"/>
+  <text class="ch" x="968" y="606">So who allows it?</text>
+  <text class="t" x="968" y="624">Today, in production, nobody. On classic the operator inherits</text>
+  <text class="t" x="968" y="640">an exempt identity; on HCP no identity is shared. Each</text>
+  <text class="t" x="968" y="656">component has its own (that is what MIWI, managed identities</text>
+  <text class="t" x="968" y="672">and workload identity, means), and only the platform's are</text>
+  <text class="t" x="968" y="688">exempt. CI's int environment has no deny assignments, so the</text>
+  <text class="t" x="968" y="704">write succeeds there: it shows the role is enough, not more.</text>
+  <rect class="c-amb" x="956" y="734" width="528" height="70" rx="6"/>
+  <text class="ch" x="968" y="754">1.1: only when ARO's change is available</text>
+  <text class="t" x="968" y="772">B is the only route that could make 1.1. A and C are later.</text>
+  <text class="t" x="968" y="788">e2e-aro-hcp-operator is a required, gating job, run on int.</text>
+  <text class="sub" x="20" y="852">Sources: deny assignments read off a public-service cluster on 2026-10-13; ARO-HCP deny_assignment_definitions.go; hypershift#9966; ARO on Slack, 2026-10-15 and 16.</text>
+</svg>
