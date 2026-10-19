@@ -64,6 +64,9 @@ resource_group="$(read_fact "$facts" resource_group)"
 managed_resource_group="$(read_fact "$facts" managed_resource_group)"
 subscription="$(read_fact "$facts" subscription)"
 client_id="$(read_fact "$facts" client_id)"
+# supplied: the cluster ran as a principal aro-create-cluster was handed
+# rather than registered, such as the installer's own. Never ours to delete.
+principal="$(read_fact "$facts" principal)"
 
 for k in cluster_name resource_group managed_resource_group subscription; do
     [ -n "${!k}" ] || die "cluster-facts has no $k" "It is written by aro-create-cluster; is $facts one of its?"
@@ -141,6 +144,10 @@ delete_group() {
 }
 
 delete_application() {
+    if [ "$principal" = supplied ]; then
+        info "  $client_id was supplied, not registered for this cluster; left alone"
+        return 0
+    fi
     if [ "$cluster_gone" != true ]; then
         warn "  the cluster may still exist; not deleting the principal it runs as"
         return 1
@@ -173,8 +180,9 @@ audit() {
             left=true
         fi
     done
+    [ "$principal" = supplied ] && ids="" ||
     ids="$(az ad app list --display-name "$managed_resource_group" --query '[].appId' -o tsv)" || return 1
-    if [ -n "$client_id" ]; then
+    if [ -n "$client_id" ] && [ "$principal" != supplied ]; then
         ids="$ids"$'\n'"$(az ad app list --app-id "$client_id" --query '[].appId' -o tsv)" || return 1
     fi
     ids="$(grep . <<<"$ids" | sort -u | tr '\n' ' ')" || true

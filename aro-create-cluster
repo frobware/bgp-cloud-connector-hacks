@@ -56,6 +56,15 @@
 #   AZURE_REGION   default centralus
 #   PULL_SECRET    default ~/.secrets/pull-secret.json
 #   ARO_IDENTITY   managed (default) or service-principal
+#   ARO_CLUSTER_PRINCIPAL
+#                  service-principal only: a file in
+#                  osServicePrincipal.json's shape naming an existing
+#                  principal for the cluster to run as. The cluster is
+#                  then created with a PUT to ARM rather than az aro
+#                  create, which looks both principals up in Entra ID
+#                  even when handed one, and an unattended run's
+#                  principal cannot read Entra ID. Teardown leaves the
+#                  principal alone. Needs ARO_RP_OBJECT_ID.
 #   ARO_RP_OBJECT_ID
 #                  object id of the ARO resource provider's service
 #                  principal in this tenant; default looked up in Entra
@@ -74,6 +83,10 @@ case "$identity_mode" in
     service-principal|managed) ;;
     *) die "ARO_IDENTITY must be service-principal or managed, not $identity_mode" ;;
 esac
+
+cluster_principal_file="${ARO_CLUSTER_PRINCIPAL:-}"
+[ -z "$cluster_principal_file" ] || [ "$identity_mode" = service-principal ] \
+    || die "ARO_CLUSTER_PRINCIPAL is for ARO_IDENTITY=service-principal, not $identity_mode"
 
 # The version lookup below needs a working login, so this comes before
 # anything else rather than as a preflight line.
@@ -202,6 +215,36 @@ rp_principal_visible() {
     [ -n "$id" ]
 }
 
+principal_field() { jq -er --arg k "$1" '.[$k] // empty' "$cluster_principal_file"; }
+
+principal_file_usable() {
+    local k
+    for k in clientId clientSecret tenantId; do
+        principal_field "$k" >/dev/null || { printf '%s has no %s\n' "$cluster_principal_file" "$k" >&2; return 1; }
+    done
+}
+
+# The principal's object id, which role assignments need, from the oid
+# claim of a token it is issued: Entra ID hands a principal its own
+# token where it will not let it look anything up. The secret reaches
+# curl from a file, not the command line, so it is not readable out of
+# /proc.
+cluster_principal_oid=""
+resolve_principal_oid() {
+    local secret token payload
+    secret="$(mktemp)"
+    ( umask 077; principal_field clientSecret > "$secret" )
+    token="$(curl -sf -X POST "https://login.microsoftonline.com/$(principal_field tenantId)/oauth2/v2.0/token" \
+        --data-urlencode "client_id=$(principal_field clientId)" \
+        --data-urlencode "client_secret@$secret" \
+        --data-urlencode "scope=https://management.azure.com/.default" \
+        --data-urlencode "grant_type=client_credentials" | jq -er .access_token)" || { rm -f "$secret"; return 1; }
+    rm -f "$secret"
+    payload="$(cut -d. -f2 <<<"$token" | tr '_-' '/+')"
+    while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="$payload="; done
+    cluster_principal_oid="$(base64 -d <<<"$payload" | jq -er .oid)"
+}
+
 cluster_dir_free() { [ ! -e "$1/cluster-facts" ]; }
 
 dir_is_empty() {
@@ -234,6 +277,12 @@ ocp_version=$ocp_version
 identity=$identity_mode
 cluster_dir=$cluster_dir
 EOF
+    # Recorded now, not after the create: teardown reads principal=supplied
+    # as "this principal is not ours to delete", and a create that dies
+    # partway must not leave a directory that says otherwise.
+    if [ -n "$cluster_principal_file" ]; then
+        printf 'principal=supplied\nclient_id=%s\n' "$(principal_field clientId)" >> "$(facts_file)"
+    fi
     info "  wrote $(facts_file)"
 }
 
@@ -367,6 +416,86 @@ create_cluster() {
     return "$status"
 }
 
+# What az aro create does for a service principal, without its Entra ID
+# lookups: Network Contributor on the vnet for the cluster principal and
+# the resource provider's (custom.py's ensure_resource_permissions; the
+# vnet has no route table or NAT gateway to add), then the PUT.
+grant_vnet_to_principals() {
+    local rp
+    rp="$(rp_object_id)" || return 1
+    grant_to "$cluster_principal_oid" "Network Contributor" "$(vnet_scope)" || return 1
+    grant_to "$rp" "Network Contributor" "$(vnet_scope)" || return 1
+    info "  Network Contributor on $vnet for the cluster principal and the resource provider"
+}
+
+# The body is az aro create's, from the same defaults, at the API
+# version its SDK pins. It carries the pull secret and the client
+# secret, so it is written 0600 and removed once sent.
+aro_api=2025-07-25
+
+cluster_url() {
+    printf 'https://management.azure.com/subscriptions/%s/resourceGroups/%s/providers/Microsoft.RedHatOpenShift/openShiftClusters/%s?api-version=%s' \
+        "$subscription" "$resource_group" "$cluster_name" "$aro_api"
+}
+
+provisioning_state() {
+    az aro show -g "$resource_group" -n "$cluster_name" --query provisioningState -o tsv 2>/dev/null
+}
+
+create_succeeded() {
+    local state
+    state="$(provisioning_state)"
+    case "$state" in
+        Succeeded) return 0 ;;
+        Failed)    warn "  provisioningState Failed"; return 2 ;;
+        *)         info "  provisioningState ${state:-unknown}"; return 1 ;;
+    esac
+}
+
+wait_for_create() {
+    local deadline=$(( SECONDS + 7200 )) status
+    while true; do
+        status=0; create_succeeded || status=$?
+        [ "$status" -eq 0 ] && return 0
+        [ "$status" -eq 2 ] && return 1
+        [ "$SECONDS" -lt "$deadline" ] || { warn "  timed out after 7200s"; return 1; }
+        sleep 60
+    done
+}
+
+create_cluster_direct() {
+    local body="$cluster_dir/aro-create-body.json" domain status=0
+    domain="$(tr -dc 'a-z' </dev/urandom | head -c1)$(tr -dc 'a-z0-9' </dev/urandom | head -c7)"
+    ( umask 077
+      jq -n \
+        --arg location "$region" \
+        --arg version "$ocp_version" \
+        --arg domain "$domain" \
+        --arg rgid "/subscriptions/$subscription/resourceGroups/$managed_resource_group" \
+        --arg master "$(vnet_scope)/subnets/master-subnet" \
+        --arg worker "$(vnet_scope)/subnets/worker-subnet" \
+        --slurpfile ps "$pull_secret" \
+        --slurpfile sp "$cluster_principal_file" \
+        '{location: $location,
+          properties: {
+            clusterProfile: {pullSecret: ($ps[0] | tojson), domain: $domain,
+                             resourceGroupId: $rgid, fipsValidatedModules: "Disabled",
+                             version: $version},
+            servicePrincipalProfile: {clientId: $sp[0].clientId, clientSecret: $sp[0].clientSecret},
+            networkProfile: {podCidr: "10.128.0.0/14", serviceCidr: "172.30.0.0/16",
+                             preconfiguredNSG: "Disabled"},
+            masterProfile: {vmSize: "Standard_D8s_v5", subnetId: $master, encryptionAtHost: "Disabled"},
+            workerProfiles: [{name: "worker", vmSize: "Standard_D4s_v5", diskSizeGB: 128,
+                              subnetId: $worker, count: 3, encryptionAtHost: "Disabled"}],
+            apiserverProfile: {visibility: "Public"},
+            ingressProfiles: [{name: "default", visibility: "Public"}]}}' > "$body" )
+    az rest --method put --url "$(cluster_url)" --body "@$body" --output none || status=$?
+    rm -f "$body"
+    [ "$status" -eq 0 ] || return "$status"
+    info "  accepted; waiting for the resource provider (about an hour)"
+    wait_for_create
+}
+
 # The application's client id, for teardown to delete. Read from the
 # cluster resource when there is one; otherwise from AAD by display
 # name, which is the only record a create that died before the cluster
@@ -439,7 +568,13 @@ grant_network_role() {
     client_id="$(cluster_oc -n kube-system get secret azure-credentials \
         -o jsonpath='{.data.azure_client_id}' | base64 -d)" || return 1
     [ -n "$client_id" ] || { warn "  kube-system/azure-credentials has no azure_client_id"; return 1; }
-    object_id="$(az ad sp show --id "$client_id" --query id -o tsv)" || return 1
+    if [ -n "$cluster_principal_file" ]; then
+        [ "$client_id" = "$(principal_field clientId)" ] \
+            || { warn "  kube-system/azure-credentials names $client_id, not the supplied principal"; return 1; }
+        object_id="$cluster_principal_oid"
+    else
+        object_id="$(az ad sp show --id "$client_id" --query id -o tsv)" || return 1
+    fi
     az role assignment create --assignee-object-id "$object_id" \
         --assignee-principal-type ServicePrincipal --role "Network Contributor" \
         --scope "$(group_scope)" --output none || return 1
@@ -505,11 +640,19 @@ check "no resource group $managed_resource_group" \
 if [ "$identity_mode" = managed ]; then
     check "provider's operators match the identity table" role_set_matches
     check "resource provider principal visible" rp_principal_visible
+elif [ -n "$cluster_principal_file" ]; then
+    check "cluster principal file has its fields" principal_file_usable
+    check "cluster principal can sign in"     resolve_principal_oid
+    check "resource provider principal visible" rp_principal_visible
 else
     check "no AAD application $managed_resource_group" \
         aad_app_free "$managed_resource_group"
 fi
 abort_if_failed
+# check runs its command in a subshell, so the object id is resolved
+# again here for the steps to use.
+[ -z "$cluster_principal_file" ] || resolve_principal_oid \
+    || die "could not resolve the cluster principal's object id"
 info ""
 
 if [ "$dry_run" = true ]; then
@@ -528,7 +671,7 @@ on_exit() {
         warn "  az aro show -g $resource_group -n $cluster_name --output none &&"
         warn "    az aro delete --yes -g $resource_group -n $cluster_name"
         warn "  az group delete --yes --name $resource_group"
-        if [ "$identity_mode" != managed ]; then
+        if [ "$identity_mode" != managed ] && [ -z "$cluster_principal_file" ]; then
             warn "  az ad app list --display-name $managed_resource_group --query '[].appId' -o tsv"
             warn "    and az ad app delete --id <each>"
         fi
@@ -546,8 +689,13 @@ if [ "$identity_mode" = managed ]; then
     step  "managed identities"     create_identities
     step  "role assignments"       assign_identity_roles
 fi
-step  "create cluster"             create_cluster
-[ "$identity_mode" = managed ] ||
+if [ -n "$cluster_principal_file" ]; then
+    step  "vnet role assignments"  grant_vnet_to_principals
+    step  "create cluster"         create_cluster_direct
+else
+    step  "create cluster"         create_cluster
+fi
+[ "$identity_mode" = managed ] || [ -n "$cluster_principal_file" ] ||
     phase "record cluster principal" record_cluster_principal
 phase "check managed group"        check_managed_group
 step  "fetch credentials"          fetch_credentials
@@ -568,6 +716,6 @@ info ""
 info "Tear it down with:"
 info "  az aro delete --yes -g $resource_group -n $cluster_name"
 info "  az group delete --yes --name $resource_group"
-[ "$identity_mode" = managed ] ||
+[ "$identity_mode" = managed ] || [ -n "$cluster_principal_file" ] ||
     info "  az ad app delete --id \$(grep ^client_id= $(facts_file) | cut -d= -f2)"
 report
