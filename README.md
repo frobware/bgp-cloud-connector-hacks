@@ -72,7 +72,7 @@ for an hour.
 | `aro-create-cluster` | Builds an ARO classic cluster with `az aro create`. No installer. |
 | `aro-destroy-cluster` | Teardown: the cluster, its resource group, and the AAD application `az aro delete` leaves behind |
 | `aro-hcp-create-cluster` | Builds an ARO HCP cluster through the preview API, with the vnet, Key Vault and identities it needs |
-| `aro-hcp-destroy-cluster` | Teardown: the cluster, its resource group, and a purge of the soft-deleted Key Vault |
+| `aro-hcp-destroy-cluster` | Teardown: the cluster, its resource group, a purge of the soft-deleted Key Vault, and the console's Entra application |
 | `gcp-installer-credentials` | One-time: the service account and key `openshift-install` needs |
 | `gcp-create-cluster` | Builds a GCP cluster. Same shape as the AWS one, minus the credential dance. |
 | `gcp-create-install-config` | Writes a GCP install-config.yaml |
@@ -566,25 +566,37 @@ the control plane is hosted and only the nodes are yours. Neither uses
 written before anything exists, and the destroy scripts work from it
 alone.
 
-Both authenticate as your `az login`; there is no service principal
-file to write. (`aro-create-cluster` can also run as a service
-principal, for a timer; see "Running it headless" below.) What that
-login needs:
+bgp-cloud-connector supports two of the flavours these scripts build:
+classic with a service principal, and HCP. Classic with managed
+identities (`ARO_IDENTITY=managed`) still builds, but the operator does
+not support it: ARO forbids reusing a platform operator's identity,
+which is the only identity allowed to write the nodes' interfaces
+there.
 
-- Owner on the subscription, or Contributor plus User Access
-  Administrator. Both scripts create role assignments, and Contributor
-  alone fails partway through.
+### What you need
+
+- An `az login` with Owner on the subscription, or Contributor plus
+  User Access Administrator. Both scripts create role assignments, and
+  Contributor alone fails partway through.
 - `Microsoft.RedHatOpenShift` registered in the subscription. Both
   preflights check; `az provider register -n Microsoft.RedHatOpenShift
   --wait` fixes it.
+- For HCP, permission to register applications in Entra ID, which by
+  default every user has; see "The HCP console" below. Without it,
+  name an application made elsewhere in `ARO_HCP_CONSOLE_APP`.
+- For classic, a pull secret, `~/.secrets/pull-secret.json` by default.
 - `oc`, `jq`, and for HCP `openssl` and `curl`, all in the devshell.
+
+Run every script with `--dry-run` first. It runs the preflight and
+says what it would create, and the preflight is where a missing
+permission, quota or name collision shows up, rather than an hour in.
 
 ```
 az login
 
-PULL_SECRET=$HOME/.secrets/pull-secret.json aro-create-cluster --dry-run
-PULL_SECRET=$HOME/.secrets/pull-secret.json aro-create-cluster
-PULL_SECRET=$HOME/.secrets/pull-secret.json ARO_IDENTITY=service-principal aro-create-cluster
+# Classic, service principal: the flavour bgp-cloud-connector supports.
+ARO_IDENTITY=service-principal aro-create-cluster --dry-run
+ARO_IDENTITY=service-principal aro-create-cluster
 CLUSTER=clusters/<YYMMDDHHMM>-aro-OCP-<version> aro-destroy-cluster
 
 aro-hcp-create-cluster --dry-run
@@ -592,11 +604,23 @@ aro-hcp-create-cluster
 CLUSTER=clusters/<YYMMDDHHMM>-aro-hcp-OCP-<X.Y> aro-hcp-destroy-cluster
 ```
 
-The cluster directory has the same `auth/kubeconfig` and `.envrc` as
-the installer-built ones, so `cd` in and `oc` points at it.
+### What you get
+
+A cluster directory under `clusters/`, with the same `auth/kubeconfig`
+and `.envrc` as the installer-built ones, so `cd` in and `oc` points at
+it. Each script finishes by waiting for every cluster operator to be
+Available and prints the directory, the kubeconfig and the teardown
+command; a run that ends without them did not finish.
+
+Expect a classic create to take about an hour, and an HCP one about a
+quarter of that: ten minutes for the cluster and five for the node
+pool, measured on 2026-10-19. Neither is torn down for you; run the
+destroy script with the directory the create printed.
 
 `aro-identities.svg` draws which identity holds which role over which
-resource group in a classic cluster.
+resource group in a classic cluster, and `aro-classic-service-principal.svg`
+and `aro-hcp.svg` who allows the operator to write the nodes'
+interfaces on the two supported flavours.
 
 ### Classic
 
@@ -605,88 +629,21 @@ resource group in a classic cluster.
   centralus.
 - A cluster spans two resource groups. `<cluster>` holds the cluster
   resource and the vnet and is yours; `aro-<cluster>` holds the VMs and
-  carries a deny assignment, so nothing but the resource provider may
-  touch it.
+  carries a deny assignment, so nothing but the resource provider and
+  the cluster's own principal may touch it.
 - With `ARO_IDENTITY=service-principal`, `az aro create` registers an
-  AAD application for the cluster and `az
-  aro delete` does not remove it. `aro-destroy-cluster` does, and it
-  finds the application by name even when the create died partway.
-- With `ARO_IDENTITY=service-principal`, the last phase grants the
-  cluster's principal Network Contributor
+  Entra application for the cluster and `az aro delete` does not remove
+  it. `aro-destroy-cluster` does, and it finds the application by name
+  even when the create died partway.
+- The last phase grants the cluster's principal Network Contributor
   over `<cluster>`, which the operator needs to find and peer a Route
   Server there. The grant can take minutes to become visible, and the
   script waits for it.
 - The vnet leaves 10.0.4.0/27 free for a `RouteServerSubnet`.
-
-`ARO_IDENTITY=managed`, the default, builds the other kind of classic
-cluster, whose
-operators authenticate through workload identity instead of a service
-principal. ARO calls it MIWI (managed identity / workload identity),
-and it is the kind bgp-cloud-connector 1.1 has to support first:
-
-- The script creates nine user-assigned identities in `<cluster>`, one
-  for the cluster and one per platform operator, and the twenty role
-  assignments Microsoft's instructions list. `az aro create` makes
-  these for a service principal but not for managed identities. The
-  preflight checks the operator list against the one the resource
-  provider publishes for the version.
-- There is no AAD application, no `kube-system/azure-credentials`, and
-  no Network Contributor grant: an operator that needs Azure brings its
-  own identity.
-- The deny assignment on `aro-<cluster>` lets through only the eight
-  platform identities and the resource provider.
-- Built once, on 4.21.22: `az aro create` took 66 minutes, against 50
-  for a service principal cluster the day before.
-
-#### Running it unattended
-
-From cron, a CI job or any other timer, an interactive `az login`
-expires with nobody there to renew it. Log in as a service principal
-instead, such as the one `azure-installer-credentials` makes. It needs
-Contributor and User Access Administrator on the subscription, for the
-identities and role assignments.
-
-A service principal usually cannot read Entra ID, and the script
-otherwise looks up the ARO resource provider's service principal there
-to grant it a role on the vnet. Look it up once as yourself and put it
-in the environment, for example in `.envrc.local`:
-
-```
-az ad sp show --id f1dd0a37-89c6-4e07-bcd1-ffd3d43d8875 --query id -o tsv
-
-export ARO_RP_OBJECT_ID=<that object id>
-```
-
-The id belongs to the tenant, not to a cluster, so one lookup serves
-every run. Without it, a run as a service principal stops at the
-preflight with `resource provider principal visible` and `Insufficient
-privileges to complete the operation`.
-
-Log the service principal in to a directory of its own, so the run does
-not replace your own `az` login. The secret goes through a file, `az`'s
-`@path` form, because a command-line argument is readable from `/proc`
-by anything on the machine:
-
-```
-export AZURE_CONFIG_DIR=$(mktemp -d)
-sp=~/.azure/osServicePrincipal.json
-(umask 077; jq -r .clientSecret "$sp" > "$AZURE_CONFIG_DIR/secret")
-az login --service-principal --tenant "$(jq -r .tenantId "$sp")" \
-    -u "$(jq -r .clientId "$sp")" -p "@$AZURE_CONFIG_DIR/secret" --output none
-rm -f "$AZURE_CONFIG_DIR/secret"
-ARO_IDENTITY=managed direnv exec . ./aro-create-cluster
-```
-
-Allow the job two hours: the create alone takes over an hour, and the
-script then waits up to fifteen minutes for the cluster operators.
-Nothing tears the cluster down; run `aro-destroy-cluster` with the
-directory it names.
+- `ARO_IDENTITY` defaults to `managed`. Name `service-principal`
+  explicitly for the supported flavour.
 
 ### HCP
-
-`aro-hcp-create-cluster` has not yet been run end to end in its
-current form. The one run on record used an earlier version and failed
-fetching credentials, after the cluster and node pool had provisioned.
 
 - There is no `az` command for ARO HCP. Everything goes through `az
   rest` against the preview API, so the script records the API version
@@ -712,6 +669,98 @@ fetching credentials, after the cluster and node pool had provisioned.
   Deleting the group only soft-deletes the vault, and the name stays
   taken until it is purged, which `aro-hcp-destroy-cluster` does.
 - The vnet leaves 10.0.2.0 onwards free for a `RouteServerSubnet`.
+
+#### The HCP console
+
+An ARO HCP cluster has no OAuth server. Until an external
+authentication provider names a client for the console, the console
+operator never becomes Available, and the create never finishes. The
+script follows Microsoft's "Configure an external authentication
+provider" for ARO HCP: it registers an Entra application,
+`<cluster>-auth`, with this cluster's console callback, gives the
+cluster an `externalAuths` resource naming it, and puts its secret in
+`openshift-config`. The secret is also kept in
+`auth/console-client-secret`.
+
+Signing in to the console then sends you to Entra ID, but OpenShift
+grants nothing to a user on first sign-in. Bind yourself to a role
+with the break-glass kubeconfig; the user name is your Entra
+`preferred_username`:
+
+```
+oc create clusterrolebinding <you>-admin --clusterrole=cluster-admin --user=<you>@<domain>
+```
+
+`aro-hcp-destroy-cluster` deletes the application: it lives in the
+tenant, not the subscription, so deleting the cluster's resource
+group would leave it behind.
+
+A login that may not register applications, such as most service
+principals, names one made elsewhere instead, in a file shaped like
+`osServicePrincipal.json`:
+
+```
+ARO_HCP_CONSOLE_APP=<file with tenantId, clientId, clientSecret> aro-hcp-create-cluster
+```
+
+That application is shared between clusters and is never deleted by
+teardown. It carries no cluster's callback, so the console becomes
+Available but signing in to it fails.
+
+### Running unattended
+
+From cron, a CI job or any other scheduler, an interactive `az login`
+expires with nobody there to renew it. Log in as a service principal
+instead, such as the one `azure-installer-credentials` makes. It needs
+Contributor and User Access Administrator on the subscription, and it
+usually cannot read Entra ID, which changes what each script needs.
+
+Log it in to a directory of its own, so the run does not replace your
+own `az` login. The secret goes through a file, `az`'s `@path` form,
+because a command-line argument is readable from `/proc` by anything
+on the machine:
+
+```
+export AZURE_CONFIG_DIR=$(mktemp -d)
+sp=~/.azure/osServicePrincipal.json
+(umask 077; jq -r .clientSecret "$sp" > "$AZURE_CONFIG_DIR/secret")
+az login --service-principal --tenant "$(jq -r .tenantId "$sp")" \
+    -u "$(jq -r .clientId "$sp")" -p "@$AZURE_CONFIG_DIR/secret" --output none
+rm -f "$AZURE_CONFIG_DIR/secret"
+```
+
+Classic: `az aro create` looks both the cluster's principal and the
+resource provider's up in Entra ID, so hand the script both. The
+resource provider's object id belongs to the tenant, not to a cluster;
+look it up once as yourself and keep it, for example in
+`.envrc.local`. `ARO_CLUSTER_PRINCIPAL` names the principal the cluster
+runs as, which may be the one you logged in as, and the script then
+creates the cluster with a PUT to ARM instead of `az aro create`.
+Teardown leaves a supplied principal alone.
+
+```
+az ad sp show --id f1dd0a37-89c6-4e07-bcd1-ffd3d43d8875 --query id -o tsv   # as yourself, once
+
+export ARO_RP_OBJECT_ID=<that object id>
+ARO_IDENTITY=service-principal ARO_CLUSTER_PRINCIPAL=$sp \
+    direnv exec . ./aro-create-cluster
+```
+
+Without `ARO_RP_OBJECT_ID`, the preflight stops at `resource provider
+principal visible` with `Insufficient privileges to complete the
+operation`.
+
+HCP: the console's application cannot be registered, so supply one,
+registered once as yourself with no redirect URIs:
+
+```
+ARO_HCP_CONSOLE_APP=<file> direnv exec . ./aro-hcp-create-cluster
+```
+
+Allow either run two hours. The classic create took about an hour on
+2026-10-19 and the script then waits up to fifteen minutes for the
+cluster operators; the HCP create took about a quarter of an hour, and
+the operator wait is up to half an hour.
 
 ## Why bash, mostly
 
