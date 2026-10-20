@@ -42,6 +42,12 @@
 #   ARO_HCP_VERSION  X.Y; default the latest minor with a version enabled
 #                    in the region. The service picks the z-stream.
 #   AZURE_REGION     default uksouth; must be one the service offers
+#   ARO_HCP_CONSOLE_APP
+#                    a file in osServicePrincipal.json's shape (tenantId,
+#                    clientId, clientSecret) naming an Entra app for the
+#                    console to sign in with. Without it the script
+#                    registers one for this cluster, which needs a login
+#                    that may register applications; see Console below.
 
 set -euo pipefail
 
@@ -76,6 +82,10 @@ sub_id="/subscriptions/$subscription"
 rg_id="$sub_id/resourceGroups/$resource_group"
 cluster_id="$rg_id/providers/Microsoft.RedHatOpenShift/hcpOpenShiftClusters/$cluster_name"
 node_pool_id="$cluster_id/nodePools/$node_pool"
+external_auth=entra
+external_auth_id="$cluster_id/externalAuths/$external_auth"
+console_app="${ARO_HCP_CONSOLE_APP:-}"
+console_app_name="$cluster_name-auth"
 
 # Versions are per region, and a version can be listed but disabled.
 # The cluster takes only X.Y: the API calls it the desired minor, and
@@ -542,6 +552,109 @@ match_control_plane_version() {
     info "  control plane $node_pool_version; the node pool will match"
 }
 
+# ---------------------------------------------------------------------
+# Console. An ARO HCP cluster has no OAuth server: authentication is
+# type OIDC, and the console operator writes console-oauth-config only
+# from an OIDC client the cluster names for the console. Until one is
+# named the console has no pods and its operator is never Available.
+#
+# This is Microsoft's "Configure an external authentication provider"
+# for ARO HCP, step for step: an Entra app with the console's callback
+# and http://localhost:8000 (for oc login) as redirect URIs, an
+# externalAuths resource naming it for the console and the CLI, and its
+# secret in openshift-config/<name>-console-openshift-console.
+#
+# Registering the app needs a login that may register applications in
+# Entra ID, which by default is any user. A service principal without
+# Graph rights cannot, so ARO_HCP_CONSOLE_APP supplies one made
+# elsewhere. A supplied app cannot carry each cluster's callback, so
+# with one the console comes up but signing in to it fails.
+# ---------------------------------------------------------------------
+
+console_secret="$cluster_dir/auth/console-client-secret"
+
+# Reading applications is the nearest check that does not register
+# one: a principal with no Graph rights is refused it.
+graph_readable() {
+    az rest --method get --url 'https://graph.microsoft.com/v1.0/applications?%24top=1' --output none 2>/dev/null
+}
+
+console_app_field() { jq -er --arg f "$1" '.[$f] // empty' "$console_app"; }
+
+console_app_usable() {
+    [ -r "$console_app" ] || return 1
+    console_app_field tenantId >/dev/null && console_app_field clientId >/dev/null \
+        && console_app_field clientSecret >/dev/null
+}
+
+# The app id goes into cluster-facts before anything else can fail, so
+# aro-hcp-destroy-cluster can delete the app whatever happens next.
+register_console_app() {
+    local url
+    url="$(az rest --method GET --url "https://management.azure.com$cluster_id?api-version=$api" \
+        --query properties.console.url -o tsv)" || return 1
+    [ -n "$url" ] || { warn "  the cluster reports no console URL"; return 1; }
+    console_client_id="$(az ad app create --display-name "$console_app_name" \
+        --web-redirect-uris "$url/auth/callback" http://localhost:8000 \
+        --query appId -o tsv)" || return 1
+    printf 'console_app_id=%s\n' "$console_client_id" >> "$(facts_file)"
+    console_tenant="$(az account show --query tenantId -o tsv)" || return 1
+    ( umask 077
+      az ad app credential reset --id "$console_client_id" --query password -o tsv 2>/dev/null \
+          | tr -d '\n' > "$console_secret" ) || return 1
+    [ -s "$console_secret" ] || { warn "  no client secret came back"; return 1; }
+    info "  registered $console_app_name, callback $url/auth/callback"
+}
+
+use_supplied_console_app() {
+    console_client_id="$(console_app_field clientId)" || return 1
+    console_tenant="$(console_app_field tenantId)" || return 1
+    ( umask 077; console_app_field clientSecret | tr -d '\n' > "$console_secret" ) || return 1
+    printf 'console_app_id=supplied\n' >> "$(facts_file)"
+    info "  using $console_client_id from $console_app"
+}
+
+console_app_step() {
+    mkdir -p "$cluster_dir/auth"
+    if [ -n "$console_app" ]; then
+        use_supplied_console_app
+    else
+        register_console_app
+    fi
+}
+
+external_auth_body() {
+    jq -n --arg tenant "$console_tenant" --arg client "$console_client_id" '{
+      properties: {
+        claim: {mappings: {
+          username: {claim: "preferred_username", prefixPolicy: "NoPrefix"},
+          groups: {claim: "groups"}}},
+        clients: [
+          {clientId: $client, component: {name: "console", authClientNamespace: "openshift-console"},
+           extraScopes: ["profile"], type: "Confidential"},
+          {clientId: $client, component: {name: "cli", authClientNamespace: "openshift-console"},
+           extraScopes: ["profile"], type: "Public"}],
+        issuer: {url: "https://login.microsoftonline.com/\($tenant)/v2.0", audiences: [$client]}}}'
+}
+
+# From the file, so the secret is never on a command line.
+console_client_secret_applied() {
+    cluster_oc -n openshift-config create secret generic \
+        "$external_auth-console-openshift-console" \
+        --from-file=clientSecret="$console_secret" --dry-run=client -o yaml \
+        | cluster_oc apply -f - >/dev/null 2>&1
+}
+
+# The kube-apiserver restarts once the external auth exists (ARO-HCP's
+# test/e2e/external_auth_create.go waits for it), so the secret is
+# retried rather than tried once.
+configure_console() {
+    put_and_wait "$external_auth_id" "$(external_auth_body)" 1800 external-auth || return 1
+    wait_until 300 15 "openshift-config to take the console's client secret" \
+        console_client_secret_applied || return 1
+    info "  console signs in through $external_auth"
+}
+
 # Conditions, never columns; see CLAUDE.md.
 operators_unavailable() {
     cluster_oc get co -o json 2>/dev/null \
@@ -595,6 +708,11 @@ check "Key Vault name within 24 chars"        key_vault_name_valid "$key_vault"
 check "Key Vault name $key_vault available"   key_vault_name_free "$key_vault"
 check "no resource group $resource_group"     resource_group_free "$resource_group"
 check "no resource group $managed_resource_group" resource_group_free "$managed_resource_group"
+if [ -n "$console_app" ]; then
+    check "console app $console_app has tenantId, clientId, clientSecret" console_app_usable
+else
+    check "can read Microsoft Graph applications, to register the console's app (or set ARO_HCP_CONSOLE_APP)" graph_readable
+fi
 abort_if_failed
 info ""
 
@@ -628,6 +746,8 @@ step  "create cluster"       create_cluster
 step  "fetch credentials"    fetch_credentials
 step  "control-plane version" match_control_plane_version
 step  "node pool"            create_node_pool
+step  "console app"          console_app_step
+step  "console sign-in"      configure_console
 phase "verify operators"     verify_cluster
 
 cleanup_guidance=false
