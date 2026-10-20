@@ -5,7 +5,7 @@
 #   CLUSTER=$PWD/clusters/<YYMMDDHHMM>-aro-hcp-OCP-<version> aro-hcp-destroy-cluster --dry-run
 #   CLUSTER=$PWD/clusters/<YYMMDDHHMM>-aro-hcp-OCP-<version> aro-hcp-destroy-cluster
 #
-# Three things to remove, in this order:
+# Four things to remove, in this order:
 #
 #   1. the cluster, with a DELETE on the hcpOpenShiftClusters resource.
 #      Its node pools and the managed group, aro-<cluster>, go with it.
@@ -14,6 +14,10 @@
 #      managed identities.
 #   3. the Key Vault, which deleting the group only moves into soft
 #      delete, where its name stays taken until it is purged.
+#   4. the Entra application the console signs in with, <cluster>-auth,
+#      when aro-hcp-create-cluster registered it. An application lives
+#      in the tenant, not the subscription, so nothing above removes it.
+#      One handed over in ARO_HCP_CONSOLE_APP is left alone.
 #
 # The group waits for the cluster to be confirmed gone. The cluster's
 # identities and network are in that group, and pulling them out from
@@ -56,6 +60,10 @@ key_vault="$(read_fact "$facts" key_vault)"
 subscription="$(read_fact "$facts" subscription)"
 region="$(read_fact "$facts" region)"
 api="$(read_fact "$facts" api_version)"
+# The console's application id, or supplied; absent for a directory
+# written before the console was configured.
+console_app_id="$(read_fact "$facts" console_app_id)"
+console_app_name="$cluster_name-auth"
 
 for k in cluster_name resource_group managed_resource_group key_vault subscription region api; do
     [ -n "${!k}" ] || die "cluster-facts has no ${k/api/api_version}" "It is written by aro-hcp-create-cluster; is $facts one of its?"
@@ -151,6 +159,34 @@ purge_vault() {
     try az keyvault purge "${sub[@]}" --name "$key_vault" --location "$region"
 }
 
+# The recorded id, and every application carrying the cluster's name,
+# which also finds one whose create died before its id was recorded.
+console_app_ids() {
+    local ids
+    ids="$(az ad app list --display-name "$console_app_name" --query '[].appId' -o tsv)" || return 1
+    if [ -n "$console_app_id" ]; then
+        ids="$ids"$'\n'"$(az ad app list --app-id "$console_app_id" --query '[].appId' -o tsv)" || return 1
+    fi
+    sort -u <<<"$ids" | sed '/^$/d'
+}
+
+delete_console_app() {
+    if [ "$console_app_id" = supplied ]; then
+        info "  the console's application was supplied, not registered for this cluster; left alone"
+        return 0
+    fi
+    local ids id status=0
+    ids="$(console_app_ids)" || return 1
+    if [ -z "$ids" ]; then
+        info "  no application"
+        return 0
+    fi
+    while IFS= read -r id; do
+        try az ad app delete --id "$id" || status=1
+    done <<<"$ids"
+    return "$status"
+}
+
 # Look rather than trust. A lookup that fails is a failure, never an
 # empty answer.
 audit() {
@@ -158,7 +194,7 @@ audit() {
         info "  (skipped: nothing was deleted)"
         return 0
     fi
-    local left=false state
+    local left=false state ids
     state="$(cluster_state)" || return 1
     [ "$state" = "absent" ] || { warn "  cluster     $cluster_name"; left=true; }
     for g in "$resource_group" "$managed_resource_group"; do
@@ -171,6 +207,10 @@ audit() {
         warn "  vault       $key_vault (soft-deleted)"
         left=true
     fi
+    if [ "$console_app_id" != supplied ]; then
+        ids="$(console_app_ids)" || return 1
+        [ -z "$ids" ] || { warn "  application $console_app_name"; left=true; }
+    fi
     [ "$left" = false ] || return 1
     info "  nothing"
 }
@@ -178,6 +218,7 @@ audit() {
 phase "cluster"          delete_cluster
 phase "resource group"   delete_group
 phase "Key Vault purge"  purge_vault
+phase "console app"      delete_console_app
 phase "remaining"        audit
 
 info "Cloud resources only. This directory is untouched:"
