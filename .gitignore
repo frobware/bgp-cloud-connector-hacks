@@ -44,6 +44,7 @@
 !azure-destroy-cluster
 !azure-installer-credentials
 !azure-list-route-server
+!azure-scrub
 !aro-create-cluster
 !aro-destroy-cluster
 !aro-hcp-create-cluster

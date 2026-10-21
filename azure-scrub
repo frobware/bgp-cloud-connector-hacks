@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+#
+# Find what is left behind in the Azure subscription: by CI, whose
+# teardown is supposed to remove everything, and by the scripts here.
+#
+#   azure-scrub list
+#   STALE_HOURS=24 azure-scrub list
+#   AZURE_SUBSCRIPTION=<id> azure-scrub list
+#
+# list is read-only. It reports, subscription-wide:
+#
+#   - resource groups tagged bgp-cloud-connector-ci-*, which only
+#     e2e-aro-hcp-operator makes, judged by the group's own
+#     bgp-cloud-connector-ci-delete-after;
+#   - ci-op-* groups older than STALE_HOURS (default 12). Every
+#     azure-qe job names its groups this way, ours and other teams',
+#     and none runs anywhere near that long, so an old one is a
+#     teardown that did not finish; the name does not say whose;
+#   - groups named <CLUSTER_USER>-*, and aro-<CLUSTER_USER>-*, which
+#     the create scripts here make, with their age. These are meant to
+#     exist until you tear them down; listed so you can see which you
+#     forgot;
+#   - soft-deleted Key Vaults, which hold their name until purged, with
+#     their tags, which a soft-deleted vault keeps;
+#   - Route Servers, which bill hourly, with their age;
+#   - role assignments the CI job made (description
+#     bgp-cloud-connector-ci ...) whose principal is no longer a managed
+#     identity in the subscription, and, when your login can read
+#     Microsoft Graph, a count of every role assignment whose principal
+#     has been deleted, which is what Azure leaves when an identity goes
+#     but the scope it was granted on survives;
+#   - Entra applications named <CLUSTER_USER>-*-auth, which
+#     aro-hcp-create-cluster registers for a console, whose cluster's
+#     group no longer exists.
+#
+# Names, ages and counts only; no ids are printed.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/azure-lib.bash"
+
+usage="Usage: ${0##*/} list"
+[ $# -eq 1 ] || die "say what to do" "$usage"
+case "$1" in
+    list) ;;
+    *) die "unknown mode: $1" "$usage" ;;
+esac
+
+require_cmd az jq
+require_azure
+
+if [ -n "${AZURE_SUBSCRIPTION:-}" ]; then
+    az account set --subscription "$AZURE_SUBSCRIPTION" \
+        || die "cannot select subscription $AZURE_SUBSCRIPTION"
+fi
+
+subscription="$(azure_active_subscription)"
+sub_url="https://management.azure.com/subscriptions/$subscription"
+stale_hours="${STALE_HOURS:-12}"
+[[ "$stale_hours" =~ ^[0-9]+$ ]] || die "STALE_HOURS must be a whole number of hours, not $stale_hours"
+cluster_user="${CLUSTER_USER:-${USER:-$(whoami)}}"
+now="$(date -u +%s)"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# GET every page of an ARM list into one JSON array.
+arm_list() {
+    local url="$1" page
+    : >"$work/pages"
+    while [ -n "$url" ]; do
+        page="$(az rest --method GET --url "$url" -o json)" || return 1
+        jq -c '.value[]' <<<"$page" >>"$work/pages"
+        url="$(jq -r '.nextLink // empty' <<<"$page")"
+    done
+    jq -s . "$work/pages"
+}
+
+# Hours since an ISO 8601 time, or ? when there is none.
+age_hours() {
+    local t
+    if [ -z "$1" ] || ! t="$(date -u -d "$1" +%s 2>/dev/null)"; then
+        printf '?'
+        return
+    fi
+    printf '%d' $(( (now - t) / 3600 ))
+}
+
+heading() { info ""; info "--- $1 ---"; }
+
+arm_list "$sub_url/resourcegroups?api-version=2021-04-01&\$expand=createdTime" >"$work/groups.json" \
+    || die "cannot list resource groups in $subscription"
+
+info "Subscription: $(az account show --query name -o tsv)"
+info "Stale after:  ${stale_hours}h"
+info "Your prefix:  $cluster_user-"
+
+heading "groups tagged bgp-cloud-connector-ci-*"
+n=0
+while IFS=$'\t' read -r name job build after created; do
+    n=$((n + 1))
+    verdict=live
+    if [ -n "$after" ] && [ "$(date -u -d "$after" +%s 2>/dev/null || echo 0)" -lt "$now" ]; then
+        verdict=STALE
+    fi
+    info "  $verdict  $name  job=$job build=$build delete-after=${after:-unset} age=$(age_hours "$created")h"
+done < <(jq -r '.[] | select((.tags // {}) | has("bgp-cloud-connector-ci-job"))
+    | [.name, .tags["bgp-cloud-connector-ci-job"], (.tags["bgp-cloud-connector-ci-build-id"] // ""),
+       (.tags["bgp-cloud-connector-ci-delete-after"] // ""), (.createdTime // "")] | @tsv' "$work/groups.json")
+[ "$n" -gt 0 ] || info "  none"
+
+heading "ci-op-* groups older than ${stale_hours}h (owner unknown)"
+n=0
+while IFS=$'\t' read -r name created; do
+    age="$(age_hours "$created")"
+    [ "$age" != "?" ] && [ "$age" -lt "$stale_hours" ] && continue
+    n=$((n + 1))
+    info "  $name  age=${age}h"
+done < <(jq -r '.[] | select(.name | startswith("ci-op-"))
+    | select((.tags // {}) | has("bgp-cloud-connector-ci-job") | not)
+    | [.name, (.createdTime // "")] | @tsv' "$work/groups.json" | sort)
+[ "$n" -gt 0 ] || info "  none"
+
+heading "your groups ($cluster_user-*, aro-$cluster_user-*)"
+n=0
+while IFS=$'\t' read -r name created; do
+    n=$((n + 1))
+    info "  $name  age=$(age_hours "$created")h"
+done < <(jq -r --arg u "$cluster_user-" '.[] | select((.name | startswith($u)) or (.name | startswith("aro-" + $u)))
+    | [.name, (.createdTime // "")] | @tsv' "$work/groups.json" | sort)
+[ "$n" -gt 0 ] || info "  none"
+
+heading "soft-deleted Key Vaults"
+az keyvault list-deleted --resource-type vault -o json >"$work/vaults.json" \
+    || die "cannot list soft-deleted Key Vaults"
+n=0
+while IFS=$'\t' read -r name location deleted purge ours; do
+    n=$((n + 1))
+    info "  $name  $location  deleted=$deleted purge-by=$purge${ours:+  ci build=$ours}"
+done < <(jq -r '.[] | [.name, .properties.location, (.properties.deletionDate // "?"),
+    (.properties.scheduledPurgeDate // "?"), ((.properties.tags // {})["bgp-cloud-connector-ci-build-id"] // "")] | @tsv' \
+    "$work/vaults.json" | sort)
+[ "$n" -gt 0 ] || info "  none"
+
+heading "Route Servers"
+arm_list "$sub_url/resources?api-version=2021-04-01&\$filter=resourceType%20eq%20'Microsoft.Network/virtualHubs'&\$expand=createdTime" \
+    >"$work/hubs.json" || die "cannot list Route Servers"
+n=0
+while IFS=$'\t' read -r name group created; do
+    n=$((n + 1))
+    info "  $name  group=$group age=$(age_hours "$created")h"
+done < <(jq -r '.[] | [.name, (.id | split("/")[4]), (.createdTime // "")] | @tsv' "$work/hubs.json" | sort)
+[ "$n" -gt 0 ] || info "  none"
+
+heading "role assignments"
+arm_list "$sub_url/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01" >"$work/assignments.json" \
+    || die "cannot list role assignments"
+arm_list "$sub_url/providers/Microsoft.ManagedIdentity/userAssignedIdentities?api-version=2023-01-31" >"$work/identities.json" \
+    || die "cannot list managed identities"
+info "  $(jq length "$work/assignments.json") in the subscription"
+
+ours="$(jq -r --slurpfile ids <(jq '[.[].properties.principalId]' "$work/identities.json") '
+    [.[] | select((.properties.description // "") | startswith("bgp-cloud-connector-ci"))] as $a
+    | [$a | length, ($a | map(select(.properties.principalId as $p | $ids[0] | any(.[]; . == $p) | not)) | length)] | @tsv' \
+    "$work/assignments.json")"
+info "  $(cut -f1 <<<"$ours") made by the CI job, $(cut -f2 <<<"$ours") of them naming an identity that no longer exists"
+
+# Graph answers getByIds with the objects that still exist; anything
+# asked about and not returned has been deleted. Asked in batches,
+# because the call takes at most 1000 ids.
+jq -r '[.[].properties.principalId] | unique | .[]' "$work/assignments.json" >"$work/principals"
+: >"$work/found"
+graph_ok=true
+split -l 1000 "$work/principals" "$work/batch."
+for batch in "$work"/batch.*; do
+    [ -e "$batch" ] || continue
+    if ! az rest --method POST --url https://graph.microsoft.com/v1.0/directoryObjects/getByIds \
+            --body "$(jq -Rn '{ids: [inputs]}' <"$batch")" -o json 2>/dev/null \
+            | jq -r '.value[].id' >>"$work/found"; then
+        graph_ok=false
+        break
+    fi
+done
+if [ "$graph_ok" = true ]; then
+    deleted="$(jq -r --rawfile f "$work/found" '($f | split("\n")) as $live
+        | [.[] | select(.properties.principalId as $p | $live | any(.[]; . == $p) | not)]
+        | "\(length)\t\(map(.properties.scope | split("/") | if length > 4 then .[4] else "(subscription)" end)
+            | group_by(.) | map("\(.[0])=\(length)") | join(" "))"' "$work/assignments.json")"
+    info "  $(cut -f1 <<<"$deleted") naming a principal that has been deleted"
+    [ -z "$(cut -f2 <<<"$deleted")" ] || info "    by scope's group: $(cut -f2 <<<"$deleted")"
+else
+    info "  cannot read Microsoft Graph as this login, so deleted principals are not counted"
+    info "  (log in as yourself rather than as a service principal to see them)"
+fi
+
+heading "Entra applications $cluster_user-*-auth whose group is gone"
+if apps="$(az ad app list --filter "startswith(displayName,'$cluster_user-')" --query '[].displayName' -o tsv 2>/dev/null)"; then
+    n=0
+    while IFS= read -r app; do
+        [[ "$app" == *-auth ]] || continue
+        group="${app%-auth}"
+        jq -e --arg g "$group" 'any(.[]; .name == $g)' "$work/groups.json" >/dev/null && continue
+        n=$((n + 1))
+        info "  $app"
+    done <<<"$apps"
+    [ "$n" -gt 0 ] || info "  none"
+else
+    info "  cannot read Microsoft Graph as this login"
+fi

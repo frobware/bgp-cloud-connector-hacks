@@ -69,6 +69,7 @@ for an hour.
 | `azure-create-cluster` | Builds an Azure cluster. Same shape as the GCP one. |
 | `azure-create-install-config` | Writes an Azure install-config.yaml |
 | `azure-destroy-cluster` | Teardown, plus a check that destroy really took everything |
+| `azure-scrub` | `list`: what is left in the subscription after CI and these scripts -- stale CI groups, unpurged Key Vaults, Route Servers, role assignments naming deleted principals, orphaned console applications |
 | `aro-create-cluster` | Builds an ARO classic cluster with `az aro create`. No installer. |
 | `aro-destroy-cluster` | Teardown: the cluster, its resource group, and the AAD application `az aro delete` leaves behind |
 | `aro-hcp-create-cluster` | Builds an ARO HCP cluster through the preview API, with the vnet, Key Vault and identities it needs |
