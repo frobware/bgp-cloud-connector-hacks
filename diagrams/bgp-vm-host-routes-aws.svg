@@ -1,0 +1,206 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 1100" width="1160" height="1100" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    /* Declares which schemes this document supports, which is what the
+       browser paints the canvas from. Without it the area beyond this
+       fixed 1160-wide box stays white in a dark browser: the media
+       query below only decides what we draw, never what the browser
+       draws around us. */
+    :root { color-scheme: light dark; }
+
+    .bg      { fill: #ffffff; }
+    .title   { fill: #14161a; font-size: 22px; font-weight: 700; }
+    .sub     { fill: #5b6470; font-size: 13px; }
+    .boxlbl  { fill: #14161a; font-size: 14px; font-weight: 600; }
+    .dim     { fill: #5b6470; font-size: 12px; }
+    .mono    { fill: #14161a; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .monodim { fill: #5b6470; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .step    { fill: #2f6fb0; font-size: 13px; font-weight: 700; }
+    .warn    { fill: #b3341f; font-size: 12px; font-weight: 600; }
+    .warntxt { fill: #b3341f; font-size: 12px; }
+    .ok      { fill: #2f8f5b; font-size: 12px; font-weight: 600; }
+
+    .banner  { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 1.5; stroke-dasharray: 7 5; }
+    .ctl     { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 2; }
+    .rt      { fill: #fdf6e6; stroke: #b8891f; stroke-width: 2; }
+    .box     { fill: #ffffff; stroke: #2f6fb0; stroke-width: 2; }
+    .plain   { fill: #f2f3f5; stroke: #7b838d; stroke-width: 2; }
+    .pod     { fill: #f2f0fb; stroke: #6b5bb1; stroke-width: 2; }
+    .callout { fill: #fdf0ee; stroke: #b3341f; stroke-width: 1.5; }
+    .okbox   { fill: #eaf6ee; stroke: #2f8f5b; stroke-width: 1.5; }
+
+    .fmain   { stroke: #2f6fb0; stroke-width: 3; fill: none; }
+    .fret    { stroke: #7b838d; stroke-width: 2; stroke-dasharray: 7 4; fill: none; }
+    .fctl    { stroke: #2f8f5b; stroke-width: 2.5; fill: none; }
+    .lead    { stroke: #b3341f; stroke-width: 1.2; stroke-dasharray: 3 3; fill: none; }
+    .rule    { stroke: #d8dce1; stroke-width: 1; fill: none; }
+
+    @media (prefers-color-scheme: dark) {
+      .bg      { fill: #0f1115; }
+      .title   { fill: #e9ecf1; }
+      .sub     { fill: #99a2ae; }
+      .boxlbl  { fill: #e9ecf1; }
+      .dim     { fill: #99a2ae; }
+      .mono    { fill: #e9ecf1; }
+      .monodim { fill: #99a2ae; }
+      .step    { fill: #7fb4e8; }
+      .warn    { fill: #ff8168; }
+      .warntxt { fill: #ff8168; }
+      .ok      { fill: #4fb37c; }
+
+      .banner  { fill: #12201a; stroke: #4fb37c; }
+      .ctl     { fill: #12201a; stroke: #4fb37c; }
+      .rt      { fill: #221d12; stroke: #d8a63c; }
+      .box     { fill: #121722; stroke: #5a9bd8; }
+      .plain   { fill: #191c21; stroke: #98a1ab; }
+      .pod     { fill: #191426; stroke: #9b8bd6; }
+      .callout { fill: #241614; stroke: #ff8168; }
+      .okbox   { fill: #12201a; stroke: #4fb37c; }
+
+      .fmain   { stroke: #5a9bd8; }
+      .fret    { stroke: #98a1ab; }
+      .fctl    { stroke: #4fb37c; }
+      .lead    { stroke: #ff8168; }
+      .rule    { stroke: #2a2f37; }
+    }
+</style>
+
+  <defs>
+    <marker id="aMain" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f6fb0"/>
+    </marker>
+    <marker id="aRet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b838d"/>
+    </marker>
+    <marker id="aCtl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f8f5b"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1160" height="1100"/>
+
+  <text class="title" x="40" y="38">AWS: why a VM's outbound flow breaks, and what the host route fixes</text>
+  <text class="sub" x="40" y="60">PR #139. Layer2 CUDN 10.100.0.0/16, VM at 10.100.0.3 hosted on worker-2, three BGP router nodes, one VPC Route Server.</text>
+
+  <rect class="banner" x="40" y="76" width="1080" height="48" rx="6"/>
+  <text class="dim" x="56" y="94">OBSERVED 2026-09-22 on a three worker AWS cluster. All three nodes generated prefixes: [10.100.0.0/16], byte for byte identical.</text>
+  <text class="dim" x="56" y="112">The operator's own configuration then put network 10.100.0.3/32 into FRR on the hosting node alone, and on neither of the others.</text>
+
+  <!-- ================= band 1: today ================= -->
+  <text class="boxlbl" x="40" y="152">Today: every router node announces the whole /16, so the fabric cannot tell the nodes apart</text>
+
+  <rect class="plain" x="40" y="166" width="340" height="76" rx="7"/>
+  <text class="boxlbl" x="56" y="190">worker-1</text>
+  <text class="dim" x="56" y="210">no VM on this network</text>
+  <text class="mono" x="56" y="232">announces 10.100.0.0/16</text>
+
+  <rect class="box" x="410" y="166" width="340" height="76" rx="7"/>
+  <text class="boxlbl" x="426" y="190">worker-2, hosts the VM</text>
+  <text class="dim" x="426" y="210">the only node the VM lives on</text>
+  <text class="mono" x="426" y="232">announces 10.100.0.0/16</text>
+
+  <rect class="plain" x="780" y="166" width="340" height="76" rx="7"/>
+  <text class="boxlbl" x="796" y="190">worker-3</text>
+  <text class="dim" x="796" y="210">no VM on this network</text>
+  <text class="mono" x="796" y="232">announces 10.100.0.0/16</text>
+
+  <path class="fctl" d="M 210 242 L 210 268" marker-end="url(#aCtl)"/>
+  <path class="fctl" d="M 580 242 L 580 268" marker-end="url(#aCtl)"/>
+  <path class="fctl" d="M 950 242 L 950 268" marker-end="url(#aCtl)"/>
+
+  <rect class="rt" x="40" y="272" width="1080" height="86" rx="7"/>
+  <text class="boxlbl" x="56" y="296">VPC route table, as the Route Server builds it</text>
+  <text class="mono" x="56" y="322">10.100.0.0/16</text>
+  <text class="mono" x="200" y="322">-&gt;</text>
+  <text class="mono" x="232" y="322">eni-worker-1, eni-worker-2, eni-worker-3</text>
+  <text class="dim" x="56" y="346">One prefix, three equal next hops. AWS picks one of them per flow, and nothing in that choice knows where the VM is.</text>
+
+  <text class="boxlbl" x="40" y="392">The flow that breaks: the VM starts the conversation</text>
+
+  <rect class="pod" x="40" y="406" width="210" height="108" rx="7"/>
+  <text class="boxlbl" x="56" y="430">the VM</text>
+  <text class="dim" x="56" y="450">running on worker-2</text>
+  <text class="dim" x="56" y="468">calls out to a VPC host</text>
+  <text class="mono" x="56" y="492">10.100.0.3</text>
+
+  <rect class="box" x="300" y="406" width="210" height="108" rx="7"/>
+  <text class="boxlbl" x="316" y="430">worker-2 ENI</text>
+  <text class="dim" x="316" y="450">the packet leaves here,</text>
+  <text class="dim" x="316" y="468">so the security group</text>
+  <text class="ok" x="316" y="492">records the flow</text>
+
+  <rect class="plain" x="560" y="406" width="210" height="108" rx="7"/>
+  <text class="boxlbl" x="576" y="430">EC2 instance</text>
+  <text class="dim" x="576" y="450">an ordinary VPC host,</text>
+  <text class="dim" x="576" y="468">replies to the sender</text>
+  <text class="monodim" x="576" y="492">dst 10.100.0.3</text>
+
+  <rect class="box" x="820" y="406" width="210" height="108" rx="7"/>
+  <text class="boxlbl" x="836" y="430">worker-1 ENI</text>
+  <text class="dim" x="836" y="450">the fabric chose this</text>
+  <text class="dim" x="836" y="468">next hop for the reply</text>
+  <text class="warn" x="836" y="492">no state for the flow</text>
+
+  <path class="fmain" d="M 250 460 L 300 460" marker-end="url(#aMain)"/>
+  <path class="fmain" d="M 510 460 L 560 460" marker-end="url(#aMain)"/>
+  <path class="fret" d="M 770 460 L 820 460" marker-end="url(#aRet)"/>
+
+  <text class="step" x="275" y="446" text-anchor="middle">1</text>
+  <text class="step" x="535" y="446" text-anchor="middle">2</text>
+  <text class="step" x="795" y="446" text-anchor="middle">3</text>
+
+  <path class="lead" d="M 925 514 L 925 534"/>
+  <rect class="callout" x="820" y="534" width="210" height="68" rx="7"/>
+  <text class="warn" x="836" y="558">reply is dropped</text>
+  <text class="warntxt" x="836" y="578">a security group is stateful:</text>
+  <text class="warntxt" x="836" y="594">an unseen flow is a stranger</text>
+
+  <text class="dim" x="40" y="540">Step 3 is the whole problem. The reply is addressed to 10.100.0.3, the route table offers three next hops for it, and the one AWS</text>
+  <text class="dim" x="40" y="558">picks is unrelated to the one the request left through. With three router nodes, roughly one flow in three survives.</text>
+  <text class="dim" x="40" y="582">Note that nothing here is specific to a VM. Any workload on this network that starts an outbound flow has the same fate.</text>
+
+  <path class="rule" d="M 40 626 L 1120 626"/>
+
+  <!-- ================= band 2: with the fix ================= -->
+  <text class="boxlbl" x="40" y="656">With the fix: the hosting node also announces the guest address on its own</text>
+
+  <rect class="plain" x="40" y="670" width="340" height="100" rx="7"/>
+  <text class="boxlbl" x="56" y="694">worker-1</text>
+  <text class="dim" x="56" y="714">unchanged</text>
+  <text class="mono" x="56" y="738">announces 10.100.0.0/16</text>
+
+  <rect class="box" x="410" y="670" width="340" height="100" rx="7"/>
+  <text class="boxlbl" x="426" y="694">worker-2, hosts the VM</text>
+  <text class="dim" x="426" y="714">the operator writes it an extra FRRConfiguration</text>
+  <text class="mono" x="426" y="738">announces 10.100.0.0/16</text>
+  <text class="mono" x="426" y="758">and 10.100.0.3/32</text>
+
+  <rect class="plain" x="780" y="670" width="340" height="100" rx="7"/>
+  <text class="boxlbl" x="796" y="694">worker-3</text>
+  <text class="dim" x="796" y="714">unchanged</text>
+  <text class="mono" x="796" y="738">announces 10.100.0.0/16</text>
+
+  <path class="fctl" d="M 210 770 L 210 792" marker-end="url(#aCtl)"/>
+  <path class="fctl" d="M 580 770 L 580 792" marker-end="url(#aCtl)"/>
+  <path class="fctl" d="M 950 770 L 950 792" marker-end="url(#aCtl)"/>
+
+  <rect class="rt" x="40" y="796" width="1080" height="120" rx="7"/>
+  <text class="boxlbl" x="56" y="822">VPC route table, now with a more specific row</text>
+  <text class="mono" x="56" y="852">10.100.0.0/16</text>
+  <text class="mono" x="200" y="852">-&gt;</text>
+  <text class="mono" x="232" y="852">eni-worker-1, eni-worker-2, eni-worker-3</text>
+  <text class="mono" x="56" y="876">10.100.0.3/32</text>
+  <text class="mono" x="200" y="876">-&gt;</text>
+  <text class="mono" x="232" y="876">eni-worker-2</text>
+  <text class="dim" x="56" y="902">Longest prefix wins, so the reply for that one address is no longer a coin toss. The /16 still carries everything else.</text>
+
+  <rect class="okbox" x="40" y="936" width="1080" height="34" rx="6"/>
+  <text class="ok" x="56" y="958">The reply arrives at worker-2, the node the request left through, whose security group remembers the flow and lets it in.</text>
+
+  <!-- ================= caveats ================= -->
+  <text class="boxlbl" x="40" y="1006">What this does not do</text>
+  <text class="dim" x="40" y="1028">An ordinary pod on the same network is in exactly the position drawn above and gets no /32. The fix covers VMs only.</text>
+  <text class="warntxt" x="40" y="1052">frr-k8s renders no bgp network import-check on every router, so FRR announces the /32 whether or not the node has a route for it. Verified on the</text>
+  <text class="warntxt" x="40" y="1070">cluster: the hosting node has no /32 in any VRF, in any table. Nothing withdraws a /32 left behind by a VM that moved, so it pulls traffic to a node with no VM.</text>
+
+  <text class="dim" x="40" y="1092">ENI: the elastic network interface an AWS instance owns. Stateful security group: it permits a reply only on the interface that saw the request. CUDN: cluster user-defined network.</text>
+</svg>

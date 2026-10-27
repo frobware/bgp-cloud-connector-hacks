@@ -619,9 +619,9 @@ quarter of that: ten minutes for the cluster and five for the node
 pool, measured on 2026-10-19. Neither is torn down for you; run the
 destroy script with the directory the create printed.
 
-`aro-identities.svg` draws which identity holds which role over which
-resource group in a classic cluster, and `aro-classic-service-principal.svg`
-and `aro-hcp.svg` who allows the operator to write the nodes'
+`diagrams/aro-identities.svg` draws which identity holds which role over which
+resource group in a classic cluster, and `diagrams/aro-classic-service-principal.svg`
+and `diagrams/aro-hcp.svg` who allows the operator to write the nodes'
 interfaces on the two supported flavours.
 
 ### Classic

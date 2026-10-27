@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Render each bgp-*.svg to a PNG and publish the SVGs to ~/public_html.
+# Render each diagrams/bgp-*.svg to a PNG and publish the SVGs to ~/public_html.
 #
 #   ./render-diagrams
 #
@@ -39,8 +39,8 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$publish_dir"
 
 shopt -s nullglob
-svgs=(bgp-*.svg)
-[ ${#svgs[@]} -gt 0 ] || { echo "No bgp-*.svg here."; exit 0; }
+svgs=(diagrams/bgp-*.svg)
+[ ${#svgs[@]} -gt 0 ] || { echo "No diagrams/bgp-*.svg here."; exit 0; }
 
 for svg in "${svgs[@]}"; do
     png="${svg%.svg}.png"
@@ -88,7 +88,7 @@ PY
     [ -s "$png" ] || { echo "Error: chrome produced nothing for $svg" >&2; exit 1; }
 
     cp "$svg" "$publish_dir/"
-    printf '  %-26s -> %s (%sx%s), svg published\n' "$svg" "$png" "$w" "$h"
+    printf '  %-35s -> %s (%sx%s), svg published\n' "$svg" "$png" "$w" "$h"
 done
 
 printf '\nPublished to %s\n' "$publish_dir"
