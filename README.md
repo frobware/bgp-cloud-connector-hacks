@@ -126,7 +126,7 @@ install-config, runs the credential dance and installs the cluster.
 
 The pull secret is the one from console.redhat.com, needing `quay.io` and
 `registry.redhat.io` at minimum. To pull CI payloads as well, merge in
-`registry.ci.openshift.org` with `oc registry login --to $PULL_SECRET`.
+the CI registries with `ci-registry-login --token=... --server=...`.
 
 Rehearse first if you like. The dry run generates a throwaway config
 (or reads your `INSTALL_CONFIG`) and runs every precondition against
@@ -250,11 +250,12 @@ The same variable works for `azure-create-cluster` and
 registry the payload is on. Nightlies are on
 `registry.ci.openshift.org`; ci builds are on
 `quay-proxy.ci.openshift.org`, which takes the same token under its
-own hostname:
+own hostname. `oc registry login` writes only the first, so log in
+with `ci-registry-login`, which runs it and copies the token to the
+second:
 
 ```
-jq '.auths["quay-proxy.ci.openshift.org"] = .auths["registry.ci.openshift.org"]' \
-    ~/.secrets/pull-secret.json > /tmp/ps && mv /tmp/ps ~/.secrets/pull-secret.json
+ci-registry-login --token=sha256~... --server=https://api.ci.l2s4.p1.openshiftapps.com:6443
 ```
 
 The cluster pulls from the same registry, so the entry has to be in

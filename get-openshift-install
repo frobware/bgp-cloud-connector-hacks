@@ -17,10 +17,7 @@
 # secret needs an entry for the registry the payload is on. Nightlies
 # are on registry.ci.openshift.org; ci builds are on
 # quay-proxy.ci.openshift.org, which takes the same token under its own
-# hostname:
-#
-#   jq '.auths["quay-proxy.ci.openshift.org"] = .auths["registry.ci.openshift.org"]' \
-#       ~/.secrets/pull-secret.json > /tmp/ps && mv /tmp/ps ~/.secrets/pull-secret.json
+# hostname. ci-registry-login writes it under both.
 #
 # The cluster pulls its images from the same registry, so the entry has
 # to be in the pull secret that goes into install-config.yaml too, not
@@ -113,7 +110,7 @@ if [ -n "${OCP_RELEASE:-}" ]; then
     registry="${pull_spec%%/*}"
     jq -e --arg r "$registry" '.auths[$r]' "$pull_secret" >/dev/null \
         || die "$pull_secret has no entry for $registry, which $version is pulled from" \
-               "Copy the registry.ci.openshift.org entry under that name; see the header of ${0##*/}."
+               "Log in with ci-registry-login, which writes the token under both CI hostnames."
 elif [ -n "${OCP_VERSION:-}" ]; then
     tarball="openshift-install-linux-${OCP_VERSION}.tar.gz"
     url="$base/${OCP_VERSION}/$tarball"

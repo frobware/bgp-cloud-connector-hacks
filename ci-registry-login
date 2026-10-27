@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# Log the pull secret in to the CI registries.
+#
+#   ci-registry-login --token=sha256~... --server=https://api.ci.l2s4.p1.openshiftapps.com:6443
+#
+# Takes a token from the CI cluster's console ("Copy login command")
+# and writes it under both hostnames the CI payloads are pulled from.
+# Nightlies are on registry.ci.openshift.org, which is what
+# `oc registry login` writes. ci builds are on
+# quay-proxy.ci.openshift.org, which takes the same token under its
+# own hostname but which `oc registry login` leaves alone. Logging in
+# without the copy leaves quay-proxy holding the previous token, and
+# the next 4.23.0-0.ci extract fails with "unauthorized: authentication
+# required" against an entry that is present.
+#
+# Arguments go to `oc registry login` as they are, so --token and
+# --server (or a current kubeconfig context on the CI cluster) choose
+# the account.
+#
+# Environment:
+#
+#   PULL_SECRET   default ~/.secrets/pull-secret.json
+
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+source "$here/lib.bash"
+
+require_cmd oc jq
+
+pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
+[ -f "$pull_secret" ] || die "no pull secret at $pull_secret" \
+    "Get one from console.redhat.com, or set PULL_SECRET."
+
+oc registry login --to="$pull_secret" "$@" \
+    || die "oc registry login failed"
+
+# Beside the original so the mv is a rename, and private from the
+# start because it holds the token.
+tmp="$(umask 077; mktemp "$pull_secret.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+jq '.auths["quay-proxy.ci.openshift.org"] = .auths["registry.ci.openshift.org"]' \
+    "$pull_secret" > "$tmp" \
+    || die "could not copy the registry.ci.openshift.org entry in $pull_secret"
+mv "$tmp" "$pull_secret"
+
+info "registry.ci.openshift.org and quay-proxy.ci.openshift.org updated in $pull_secret"

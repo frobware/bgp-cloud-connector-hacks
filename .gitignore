@@ -58,6 +58,7 @@
 !gcp-create-install-config
 !gcp-destroy-cluster
 !gcp-installer-credentials
+!ci-registry-login
 !get-openshift-install
 
 # Diagrams. The .svg is the source; the .png is rendered from it by
