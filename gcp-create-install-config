@@ -19,6 +19,10 @@
 # to extract, nothing to merge and nothing created before the
 # installer runs.
 #
+# GCP_WIF=1 is the exception: it writes credentialsMode: Manual, and
+# gcp-create-cluster then runs ccoctl to give each component a
+# workload identity federation binding instead of a minted key.
+#
 # GCP_BASE_DOMAIN is discovered, not defaulted. The AWS script can bake
 # qe.devcluster.openshift.com in because that zone is a fixture of the
 # QE account; the GCP project's zone name was not verifiable when this
@@ -36,6 +40,7 @@
 #   CONTROL_PLANE_TYPE      default n2-standard-4
 #   WORKER_TYPE             default n2-standard-4
 #   CLUSTER_NAME            default <user>-<YYMMDDHHMM>
+#   GCP_WIF                 1 writes credentialsMode: Manual, default 0
 #   SSH_KEY                 path to a public key, default ~/.ssh/id_ed25519.pub
 #   PULL_SECRET             path to pull-secret json, default ~/.secrets/pull-secret.json
 
@@ -64,6 +69,12 @@ worker_type="${WORKER_TYPE:-n2-standard-4}"
 ssh_key="${SSH_KEY:-$HOME/.ssh/id_ed25519.pub}"
 cluster_name="${CLUSTER_NAME:-${CLUSTER_USER:-${USER:-$(whoami)}}-$(date +%y%m%d%H%M)}"
 pull_secret="${PULL_SECRET:-$HOME/.secrets/pull-secret.json}"
+
+case "${GCP_WIF:-0}" in
+    0) credentials_mode_line="" ;;
+    1) credentials_mode_line="credentialsMode: Manual" ;;
+    *) die "GCP_WIF is ${GCP_WIF}, want 0 or 1" ;;
+esac
 
 base_domain="${GCP_BASE_DOMAIN:-}"
 if [ -z "$base_domain" ]; then
@@ -119,6 +130,7 @@ if [ "$dry_run" = true ]; then
     info "    sshKey        $ssh_key"
     info "    pullSecret    $pull_secret"
     info "    clusterName   $cluster_name"
+    info "    credentials   ${credentials_mode_line:-mint (default)}"
     report
     exit $?
 fi
@@ -130,6 +142,7 @@ cat > "$out" <<EOF
 additionalTrustBundlePolicy: Proxyonly
 apiVersion: v1
 baseDomain: $base_domain
+${credentials_mode_line}
 compute:
 - architecture: amd64
   hyperthreading: Enabled
@@ -176,4 +189,5 @@ info "  control plane $control_plane_replicas x $control_plane_type"
 info "  workers       $worker_replicas x $worker_type"
 info "  region        $region"
 info "  baseDomain    $base_domain"
+info "  credentials   ${credentials_mode_line:-mint (default)}"
 report
