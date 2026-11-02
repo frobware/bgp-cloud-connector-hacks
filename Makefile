@@ -1,4 +1,4 @@
-scripts := $(wildcard aws-*) $(wildcard azure-*) $(wildcard gcp-*) ci-registry-login get-openshift-install lib.bash
+scripts := $(wildcard aws-*) $(wildcard azure-*) $(wildcard gcp-*) ci-registry-login get-openshift-install lib.bash ccoctl-lib.bash
 
 .DEFAULT_GOAL := check
 

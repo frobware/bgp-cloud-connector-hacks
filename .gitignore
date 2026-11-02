@@ -31,6 +31,7 @@
 !aws-lib.bash
 !azure-lib.bash
 !gcp-lib.bash
+!ccoctl-lib.bash
 !aws-create-cluster
 !aws-create-install-config
 !aws-create-route-servers
