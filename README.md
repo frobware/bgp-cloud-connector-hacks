@@ -58,6 +58,7 @@ for an hour.
 |:---|:---|
 | `lib.bash` | Shared helpers. Source it, do not run it. |
 | `aws-lib.bash`, `azure-lib.bash`, `gcp-lib.bash` | Cloud-specific helpers layered over `lib.bash` |
+| `ccoctl-lib.bash` | The ccoctl half of a Manual-mode install, shared by `aws-create-cluster` and `gcp-create-cluster` with `GCP_WIF=1` |
 | `get-openshift-install` | Fetches `openshift-install` from the mirror, or extracts it from a release controller payload when `OCP_RELEASE` names one. No `aws-` prefix: it is the same binary whichever cloud you point it at. |
 | `aws-create-cluster` | Builds a cluster. Preflights everything first and owns the whole sequence. |
 | `aws-create-install-config` | Writes an install-config.yaml. Three masters by default, for the reason below. |
@@ -75,9 +76,9 @@ for an hour.
 | `aro-hcp-create-cluster` | Builds an ARO HCP cluster through the preview API, with the vnet, Key Vault and identities it needs |
 | `aro-hcp-destroy-cluster` | Teardown: the cluster, its resource group, a purge of the soft-deleted Key Vault, and the console's Entra application |
 | `gcp-installer-credentials` | One-time: the service account and key `openshift-install` needs |
-| `gcp-create-cluster` | Builds a GCP cluster. Same shape as the AWS one, minus the credential dance. |
+| `gcp-create-cluster` | Builds a GCP cluster. Same shape as the AWS one, minus the credential dance, which `GCP_WIF=1` puts back for a workload identity federation cluster. |
 | `gcp-create-install-config` | Writes a GCP install-config.yaml |
-| `gcp-destroy-cluster` | Teardown, plus a check that destroy really took everything |
+| `gcp-destroy-cluster` | Teardown, including a WIF cluster's pool and service accounts, plus a check that destroy really took everything |
 
 Everything that touches the cloud takes `--dry-run`, and nothing
 prompts. These are meant to be free-range: they do what you asked
@@ -313,7 +314,9 @@ Mint again first, or the resume fails the same way.
 One directory per cluster, under `clusters/`, and it owns everything.
 The name is `<YYMMDDHHMM>-<cloud>-OCP-<version>`. The timestamp leads
 so that `clusters/` lists in build order whatever the cloud, and the
-cloud is how you tell which teardown script a directory wants.
+cloud is how you tell which teardown script a directory wants. A GCP
+workload identity federation cluster is `gcp-wif` there, so it and a
+mint-mode cluster side by side are told apart by `ls`.
 Nothing reads the name, though: the destroy scripts decide the cloud
 from `cluster-facts` and `metadata.json`, so directories named any
 other way keep working.
@@ -428,7 +431,8 @@ filter and manifest merging. The GCP project grants Owner, so the
 installer's default mint mode holds: the cloud credential operator
 creates per-component service accounts itself, keyed on the infra id,
 and deletes them again on destroy. `gcp-create-cluster` is
-`aws-create-cluster` with that whole middle removed.
+`aws-create-cluster` with that whole middle removed, unless you ask
+for a workload identity federation cluster, below.
 
 One-time setup. The installer wants a service-account key, not your
 gcloud login, because mint mode embeds the credential in the cluster:
@@ -462,8 +466,8 @@ Differences worth knowing, next to AWS:
 - `GCP_BASE_DOMAIN` is discovered from the project's only public Cloud DNS
   zone rather than baked in. If the project grows a second zone, set
   it yourself; the error lists the candidates.
-- An install that dies before `create cluster` leaves nothing in GCP
-  at all. Mint mode creates nothing up front, so there is no ccoctl
+- In mint mode, an install that dies before `create cluster` leaves
+  nothing in GCP at all. Mint mode creates nothing up front, so there is no ccoctl
   residue and no OIDC-bucket collision to preflight for. The analogous
   check is DNS records for `api.<name>.<domain>` and leftover service
   accounts named for the cluster.
@@ -474,6 +478,72 @@ Differences worth knowing, next to AWS:
   creates the per-node BGP peers too, the operator creates them again
   under its own names, and GCP refuses two peers sharing a peer IP on
   one interface; it is for driving GCP by hand with no operator.
+
+### Workload identity federation
+
+`GCP_WIF=1` builds a cluster with no long-lived cloud credential in
+it: GCP's equivalent of AWS STS and Azure's workload identity. Each
+component authenticates with its projected
+service-account token, exchanged through a workload identity pool for
+a short-lived token as a GCP service account made for it.
+
+```
+GCP_WIF=1 gcp-create-cluster --dry-run
+GCP_WIF=1 gcp-create-cluster
+
+CLUSTER=clusters/<YYMMDDHHMM>-gcp-wif-OCP-<version> gcp-destroy-cluster
+```
+
+The install config carries `credentialsMode: Manual`, and before the
+installer runs the script does what `aws-create-cluster` does, from
+`ccoctl-lib.bash`: extract ccoctl from the payload, extract the
+`CredentialsRequest`s with `--included` and drop the feature-gated
+ones, then run `ccoctl gcp create-all`. That makes a pool and provider
+named for the cluster and one service account per request, and writes
+a secret per component plus the cluster's service-account signing key,
+which are merged into the install.
+
+`--key-storage-method=pool-jwk-file` puts the signing key on the pool
+provider itself, so no public OIDC bucket is created. The issuer the
+cluster reports still names `https://storage.googleapis.com/<name>-oidc`,
+which does not exist; GCP never fetches it, because the provider
+already holds the key, but anything else that tries OIDC discovery
+against that URL fails.
+
+What you have when it finishes:
+
+```
+oc get cloudcredential cluster -o jsonpath='{.spec.credentialsMode}'      # Manual
+oc get authentication cluster -o jsonpath='{.spec.serviceAccountIssuer}'  # set
+oc get secret -n kube-system gcp-credentials                              # NotFound
+```
+
+and each component's secret holds `service_account.json` of
+`"type": "external_account"`, reading its token from
+`/var/run/secrets/openshift/serviceaccount/token`.
+
+`cluster-facts` records `credentials_mode=wif` and `wif_name`, and
+that, not the directory name, is what tells `gcp-destroy-cluster` to
+run `ccoctl gcp delete` after the cluster has gone. It does so even
+when the install died before there was an infra id, because ccoctl had
+already run. About that phase:
+
+- ccoctl logs its failures and exits 0 regardless, so the audit that
+  follows is what says whether it worked. It lists any live pool and
+  any service account whose display name starts with the WIF name;
+  ccoctl cuts service-account ids to 12 characters of the name, so
+  the id is no use for this.
+- It finds service accounts from the requests in `credreqs/`. A
+  service account made later for an operator's own request is only
+  removed if that request is put in `credreqs/` too.
+- `--force-delete-custom-roles` is never passed. ccoctl names custom
+  roles after the project and the request, not the cluster, so every
+  WIF cluster in the project shares them, and deleting them would
+  break clusters that are not this one. They stay in the project.
+
+A deleted pool stays in a DELETED state for 30 days and its id cannot
+be reused in that time. Timestamp names never collide with one, and
+the preflight only checks for a live pool of the same name.
 
 ## Azure
 
