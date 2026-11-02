@@ -16,6 +16,15 @@
 # equivalent yet either; the Cloud Router side arrives with the
 # bgp-cloud-connector work.
 #
+# A WIF cluster (gcp-create-cluster with GCP_WIF=1) has a second
+# half the installer never learns about: ccoctl's workload identity
+# pool, its provider and one service account per CredentialsRequest,
+# all named for the cluster and created before the install started.
+# cluster-facts says credentials_mode=wif and names them, and a phase
+# after the cluster runs ccoctl gcp delete against the requests in
+# credreqs/. That phase runs even when the install never got far
+# enough to have an infra id, because ccoctl had already run.
+#
 # An install that died before "create cluster" created nothing in GCP,
 # so a directory with no metadata.json and no infra id means there is
 # genuinely nothing to delete.
@@ -24,6 +33,9 @@
 #
 #   CLUSTER_NAME=aim-2608101150 INFRA=aim-2608101150-abcde \
 #   GCP_PROJECT=<project> GCP_BASE_DOMAIN=<domain> gcp-destroy-cluster
+#
+# Add WIF_NAME=<cluster name> to audit a WIF cluster's pool and
+# service accounts as well.
 #
 # Named that way it audits and does not delete. openshift-install
 # destroy drives off the directory's metadata.json, so with no
@@ -39,7 +51,8 @@
 # reading. Remove it yourself when you are finished.
 #
 # Overrides: GOOGLE_CREDENTIALS (default ~/.secrets/gcp-osServiceAccount.json),
-# OPENSHIFT_INSTALL (default: the cluster's own bin/, then PATH).
+# OPENSHIFT_INSTALL and CCOCTL (default: the cluster's own bin/, then
+# PATH).
 
 set -euo pipefail
 
@@ -66,6 +79,7 @@ fi
 cluster_name="${CLUSTER_NAME:-}"
 infra="${INFRA:-}"
 base_domain="${GCP_BASE_DOMAIN:-}"
+wif_name="${WIF_NAME:-}"
 
 # cluster-facts first, metadata.json second: the facts file survives a
 # destroy that dies partway, the installer's file does not. Parsed,
@@ -85,6 +99,7 @@ if [ -f "$facts" ]; then
     # install-config precisely so destroy knows where the cluster
     # lives -- dead in practice, and the audit would inspect the
     # wrong project and report it clean.
+    [ -n "$wif_name" ] || wif_name="$(read_fact "$facts" wif_name)"
     facts_project="$(read_fact "$facts" project)"
     if [ -n "$facts_project" ]; then
         if [ -n "${GCP_PROJECT:-}" ] && [ "$GCP_PROJECT" != "$facts_project" ]; then
@@ -166,15 +181,32 @@ else
     installer="openshift-install"
 fi
 
+# ccoctl on the same terms: the binary that created the pool is the
+# one that knows how it named things.
+if [ -n "${CCOCTL:-}" ]; then
+    ccoctl="$CCOCTL"
+elif [ -x "${CLUSTER:-}/bin/ccoctl" ]; then
+    ccoctl="$CLUSTER/bin/ccoctl"
+else
+    ccoctl="ccoctl"
+fi
+
 echo "Project:      $GCP_PROJECT"
 echo "Cluster name: $cluster_name"
 echo "Infra id:     ${infra:-<none: the install never created the cluster>}"
 echo "Installer:    $installer"
+if [ -n "$wif_name" ]; then
+    echo "WIF name:     $wif_name"
+    echo "ccoctl:       $ccoctl"
+fi
 echo
 
 # Keyed on the same predicate as the deletion phase below, or the
 # banner promises a destroy that named mode never runs.
 echo "Will delete:"
+if [ -n "$wif_name" ]; then
+    echo "  workload identity pool $wif_name and its service accounts, via ccoctl"
+fi
 if [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
     echo "  the cluster ${infra:-$cluster_name}, via openshift-install destroy"
     echo "  (mint-mode service accounts go with it)"
@@ -182,7 +214,7 @@ elif [ -n "$infra" ]; then
     echo "  nothing: without metadata.json there is nothing for the"
     echo "  installer to destroy from, so this run only audits what"
     echo "  survives for $infra"
-else
+elif [ -z "$wif_name" ]; then
     echo "  nothing: mint mode creates nothing before the cluster itself"
 fi
 echo
@@ -203,7 +235,33 @@ else
 fi
 echo
 
-# Phase 2. Say what is actually left rather than trusting the above.
+# Phase 2, WIF clusters only. After the cluster, so nothing is still
+# authenticating through the pool while it goes.
+#
+# ccoctl finds the service accounts by display name, derived from the
+# requests in credreqs/, so without that directory it cannot find
+# them. It logs its own failures and exits 0 regardless, so its status
+# proves nothing; the audit below is what says whether it worked.
+#
+# --force-delete-custom-roles is deliberately not passed. ccoctl names
+# custom roles after the project and the request, not the cluster, so
+# every WIF cluster in the project shares them, and deleting them here
+# would strip permissions from clusters that are not this one.
+echo "--- workload identity ---"
+if [ -z "$wif_name" ]; then
+    echo "  not a WIF cluster, nothing to do"
+elif [ "$dry_run" = true ]; then
+    echo "  (skipped: dry run)"
+elif [ ! -d "${CLUSTER:-}/credreqs" ]; then
+    fail "no credreqs/ in ${CLUSTER:-<no cluster directory>}, ccoctl cannot find the service accounts"
+elif ! GOOGLE_CREDENTIALS="$key_file" try "$ccoctl" gcp delete \
+        --name="$wif_name" --project="$GCP_PROJECT" \
+        --credentials-requests-dir="$CLUSTER/credreqs"; then
+    fail "ccoctl gcp delete"
+fi
+echo
+
+# Phase 3. Say what is actually left rather than trusting the above.
 # After a clean destroy every listing here comes back empty. Matching
 # is on "<infra>-", and the infra id itself starts "<name>-", so
 # nothing here can catch another cluster's resources: the timestamp in
@@ -214,7 +272,7 @@ echo
 echo "--- remaining ---"
 if [ "$dry_run" = true ]; then
     echo "  (skipped: nothing was deleted)"
-elif [ -z "$infra" ]; then
+elif [ -z "$infra" ] && [ -z "$wif_name" ]; then
     echo "  no infra id, nothing was ever created"
 else
     remaining=""
@@ -233,78 +291,96 @@ else
         done <<< "$out"
     }
 
-    list_remaining "instance" gcloud compute instances list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    # The mint-mode accounts' emails are truncated to 30 characters
-    # (amcdermo-260-openshift-g-rnq74@...), so only the two node
-    # accounts match on email. The display name keeps the full infra id.
-    list_remaining "service account" gcloud iam service-accounts list \
-        --project "$GCP_PROJECT" \
-        --filter "email ~ ^${infra}- OR displayName ~ ^${infra}-" --format 'value(email)'
-    # The installer's own rules are named allow-<infra>-cluster and
-    # allow-<infra>-healthchecks.
-    list_remaining "firewall rule" gcloud compute firewall-rules list \
-        --project "$GCP_PROJECT" \
-        --filter "name ~ ^${infra}- OR name ~ ^allow-${infra}-" --format 'value(name)'
-    list_remaining "forwarding rule" gcloud compute forwarding-rules list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    # An install killed while waiting for network infrastructure leaves
-    # these behind with no instance or forwarding rule beside them. The
-    # Cloud NAT lives inside the router.
-    list_remaining "network" gcloud compute networks list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "subnet" gcloud compute networks subnets list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "router" gcloud compute routers list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "address" gcloud compute addresses list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "backend service" gcloud compute backend-services list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "health check" gcloud compute health-checks list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "instance group" gcloud compute instance-groups list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "target pool" gcloud compute target-pools list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "disk" gcloud compute disks list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "image" gcloud compute images list --no-standard-images \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    list_remaining "dns zone" gcloud dns managed-zones list \
-        --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
-    # Fetch guarded, filter separately. A single 'gcloud | grep ||
-    # true' pipeline forces status 0 whether gcloud failed or grep
-    # merely found nothing, and a listing we could not run must not
-    # read as a clean empty one.
-    buckets_matching() {
-        local out
-        out="$(gcloud storage ls --project "$GCP_PROJECT" 2>/dev/null)" || return 1
-        printf '%s\n' "$out" | grep -F "gs://${infra}-" || true
-    }
-    dns_records_matching() {
-        local out
-        out="$(gcloud dns record-sets list --project "$GCP_PROJECT" --zone "$1" \
-            --format 'value(name)' 2>/dev/null)" || return 1
-        printf '%s\n' "$out" | grep -F ".${cluster_name}.${base_domain}." || true
-    }
+    if [ -n "$infra" ]; then
+        list_remaining "instance" gcloud compute instances list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        # The mint-mode accounts' emails are truncated to 30 characters
+        # (amcdermo-260-openshift-g-rnq74@...), so only the two node
+        # accounts match on email. The display name keeps the full infra id.
+        list_remaining "service account" gcloud iam service-accounts list \
+            --project "$GCP_PROJECT" \
+            --filter "email ~ ^${infra}- OR displayName ~ ^${infra}-" --format 'value(email)'
+        # The installer's own rules are named allow-<infra>-cluster and
+        # allow-<infra>-healthchecks.
+        list_remaining "firewall rule" gcloud compute firewall-rules list \
+            --project "$GCP_PROJECT" \
+            --filter "name ~ ^${infra}- OR name ~ ^allow-${infra}-" --format 'value(name)'
+        list_remaining "forwarding rule" gcloud compute forwarding-rules list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        # An install killed while waiting for network infrastructure leaves
+        # these behind with no instance or forwarding rule beside them. The
+        # Cloud NAT lives inside the router.
+        list_remaining "network" gcloud compute networks list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "subnet" gcloud compute networks subnets list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "router" gcloud compute routers list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "address" gcloud compute addresses list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "backend service" gcloud compute backend-services list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "health check" gcloud compute health-checks list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "instance group" gcloud compute instance-groups list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "target pool" gcloud compute target-pools list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "disk" gcloud compute disks list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "image" gcloud compute images list --no-standard-images \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        list_remaining "dns zone" gcloud dns managed-zones list \
+            --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        # Fetch guarded, filter separately. A single 'gcloud | grep ||
+        # true' pipeline forces status 0 whether gcloud failed or grep
+        # merely found nothing, and a listing we could not run must not
+        # read as a clean empty one.
+        buckets_matching() {
+            local out
+            out="$(gcloud storage ls --project "$GCP_PROJECT" 2>/dev/null)" || return 1
+            printf '%s\n' "$out" | grep -F "gs://${infra}-" || true
+        }
+        dns_records_matching() {
+            local out
+            out="$(gcloud dns record-sets list --project "$GCP_PROJECT" --zone "$1" \
+                --format 'value(name)' 2>/dev/null)" || return 1
+            printf '%s\n' "$out" | grep -F ".${cluster_name}.${base_domain}." || true
+        }
 
-    list_remaining "bucket" buckets_matching
+        list_remaining "bucket" buckets_matching
 
-    # DNS records for api.<name>.<domain> and *.apps.<name>.<domain>.
-    # Needs the base domain; without it, say so rather than skipping
-    # in silence. zone_for_domain (gcp-lib.bash) looks at public
-    # zones only and refuses ambiguity, and the guarded assignment
-    # keeps a lookup failure from killing the script under errexit
-    # before the report prints.
-    if [ -n "$base_domain" ]; then
-        if zone="$(zone_for_domain "$GCP_PROJECT" "$base_domain")" && [ -n "$zone" ]; then
-            list_remaining "dns record" dns_records_matching "$zone"
+        # DNS records for api.<name>.<domain> and *.apps.<name>.<domain>.
+        # Needs the base domain; without it, say so rather than skipping
+        # in silence. zone_for_domain (gcp-lib.bash) looks at public
+        # zones only and refuses ambiguity, and the guarded assignment
+        # keeps a lookup failure from killing the script under errexit
+        # before the report prints.
+        if [ -n "$base_domain" ]; then
+            if zone="$(zone_for_domain "$GCP_PROJECT" "$base_domain")" && [ -n "$zone" ]; then
+                list_remaining "dns record" dns_records_matching "$zone"
+            else
+                fail "could not find the public DNS zone for $base_domain"
+            fi
         else
-            fail "could not find the public DNS zone for $base_domain"
+            echo "  (no base domain known, DNS records not checked)"
         fi
     else
-        echo "  (no base domain known, DNS records not checked)"
+        echo "  no infra id: the install never created a cluster"
+    fi
+
+    # The pool is listed live only; a deleted one lingers for 30 days
+    # in a DELETED state the default listing leaves out. ccoctl's
+    # service accounts keep the full name only in their display name,
+    # because their ids are cut to 12 characters of it.
+    if [ -n "$wif_name" ]; then
+        list_remaining "wif pool" gcloud iam workload-identity-pools list \
+            --project "$GCP_PROJECT" --location global \
+            --filter "name ~ /workloadIdentityPools/${wif_name}\$" \
+            --format 'value(name.basename())'
+        list_remaining "wif account" gcloud iam service-accounts list \
+            --project "$GCP_PROJECT" \
+            --filter "displayName ~ ^${wif_name}-" --format 'value(email)'
     fi
 
     if [ -z "$remaining" ] && [ "$(failure_count)" -eq 0 ]; then
