@@ -19,21 +19,32 @@ ensure_ccoctl() {
         return 0
     fi
 
-    mkdir -p "$bin_dir"
+    mkdir -p "$bin_dir" || return 1
 
     if [ ! -f "$ccoctl" ]; then
-        release_image="$("$installer" version | awk '/release image/ {print $3}')"
-        local cco_image
-        # -a on every call. extract_ccoctl.sh omits it on the
-        # --image-for lookup and falls back to ~/.docker/config.json,
-        # which on a credsStore setup has no usable inline auth.
-        cco_image="$(retry 3 10 oc adm release info \
-            --registry-config="$pull_secret" \
-            --image-for=cloud-credential-operator "$release_image")" || return 1
-        info "  extracting ccoctl from $cco_image"
-        ( cd "$bin_dir" && retry 3 10 oc image extract "$cco_image" \
-            --file=/usr/bin/ccoctl -a "$pull_secret" ) || return 1
-        chmod +x "$ccoctl"
+        release_image="$("$installer" version | awk '/release image/ {print $3}')" || return 1
+        # Cached as extracted, by release; patchelf below runs on the copy.
+        local key="ccoctl/${release_image##*@}" rc=0
+        cache_fetch "$key" "$ccoctl" || rc=$?
+        case "$rc" in
+            0) info "  ccoctl from the cache" ;;
+            1)
+                local cco_image
+                # -a on every call. extract_ccoctl.sh omits it on the
+                # --image-for lookup and falls back to ~/.docker/config.json,
+                # which on a credsStore setup has no usable inline auth.
+                cco_image="$(retry 3 10 oc adm release info \
+                    --registry-config="$pull_secret" \
+                    --image-for=cloud-credential-operator "$release_image")" || return 1
+                info "  extracting ccoctl from $cco_image"
+                ( cd "$bin_dir" && retry 3 10 oc image extract "$cco_image" \
+                    --file=/usr/bin/ccoctl -a "$pull_secret" ) || return 1
+                chmod +x "$ccoctl" || return 1
+                cache_store "$key" "$ccoctl" \
+                    || warn "  not cached; the next build of this release extracts again"
+                ;;
+            *) return 1 ;;
+        esac
     fi
 
     # The payload binary is dynamically linked for a generic Linux. On
@@ -70,6 +81,32 @@ extract_credential_requests() {
     # and "ok" on 2026-11-05, with the network down.
     local release_image
     release_image="$("$installer" version | awk '/release image/ {print $3}')" || return 1
+
+    # Cached by release, cloud and the part of the install-config that
+    # --included filters on. A request extracted under one capability
+    # set and reused under another is the fatal case described above
+    # drop_requests_for_disabled_capabilities. The extract is cached as
+    # it came out of the payload; the drop runs on every copy.
+    local filter key rc=0
+    filter="$(awk '/^capabilities:/ { p = 1; print; next }
+                   p && /^[[:space:]]/ { print; next }
+                   { p = 0 }
+                   /^featureSet:/ { print }' "$cluster_dir/install-config.yaml.bak" \
+              | sha256sum | cut -c1-16)" || return 1
+    key="credreqs/$1/${release_image##*@}/$filter"
+    if [ -d "$cluster_dir/credreqs" ]; then
+        rmdir "$cluster_dir/credreqs" || return 1
+    fi
+    cache_fetch "$key" "$cluster_dir/credreqs" || rc=$?
+    case "$rc" in
+        0) info "  credential requests from the cache"
+           drop_requests_for_disabled_capabilities || return 1
+           info "  $(find "$cluster_dir/credreqs" -type f | wc -l) credential request(s)"
+           return 0 ;;
+        1) ;;
+        *) return 1 ;;
+    esac
+
     mkdir -p "$cluster_dir/credreqs" || return 1
     # --included asks the payload to filter requests down to the
     # capabilities this install-config enables. It helps, but it is not
@@ -81,6 +118,8 @@ extract_credential_requests() {
         --install-config="$cluster_dir/install-config.yaml.bak" \
         --registry-config="$pull_secret" \
         --cloud="$1" --to="$cluster_dir/credreqs" "$release_image" || return 1
+    cache_store "$key" "$cluster_dir/credreqs" \
+        || warn "  not cached; the next build of this release extracts again"
     drop_requests_for_disabled_capabilities || return 1
     info "  $(find "$cluster_dir/credreqs" -type f | wc -l) credential request(s)"
 }

@@ -153,8 +153,17 @@ if [ -x "$target" ] && [ "$("$target" version 2>/dev/null | head -1 | awk '{prin
     exit 0
 fi
 
+# An installer of this version fetched before; see cache_fetch in
+# lib.bash. Keyed by version and architecture, which is what the
+# download is chosen by.
+cache_key="openshift-install/$arch/$version"
+cached=false
+[ -e "$(cache_root)/$cache_key" ] && cached=true
+
 if [ "$dry_run" = true ]; then
-    if [ -n "$pull_spec" ]; then
+    if [ "$cached" = true ]; then
+        info "  would copy from the cache: $(cache_root)/$cache_key"
+    elif [ -n "$pull_spec" ]; then
         info "  would extract from $pull_spec ($phase)"
     else
         info "  would download $url"
@@ -168,7 +177,11 @@ mkdir -p "$bin_dir"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-if [ -n "$pull_spec" ]; then
+if [ "$cached" = true ]; then
+    info "openshift-install $version from the cache"
+    cache_fetch "$cache_key" "$tmp/openshift-install" \
+        || die "could not copy $(cache_root)/$cache_key"
+elif [ -n "$pull_spec" ]; then
     info "Extracting $version ($phase) from $pull_spec..."
     retry 3 5 oc adm release extract --registry-config="$pull_secret" \
         --command=openshift-install --to="$tmp" "$pull_spec" \
@@ -180,6 +193,11 @@ else
 
     tar xzf "$tmp/oi.tar.gz" -C "$tmp" openshift-install \
         || die "no openshift-install inside $tarball"
+fi
+
+if [ "$cached" = false ]; then
+    cache_store "$cache_key" "$tmp/openshift-install" \
+        || warn "  not cached; the next build of $version downloads again"
 fi
 
 install -m 755 "$tmp/openshift-install" "$target"

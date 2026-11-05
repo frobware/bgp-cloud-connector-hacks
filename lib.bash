@@ -244,6 +244,47 @@ retry() {
     done
 }
 
+# A cache for what the create scripts download: the installer, ccoctl,
+# and the CredentialsRequests extracted from a payload. Those are the
+# only large transfers that cross your own network -- the nodes pull
+# their images from inside the cloud -- and on a slow link they are most
+# of a build: 469 MB of installer at 170 KB/s and a 27-minute extract,
+# measured on 2026-11-05 over wifi. A second build of the same release
+# makes none of them.
+#
+# Keys are paths under the cache, named for what makes the content what
+# it is: a version, a release digest, a filter. Content that a key does
+# not pin down does not belong in the cache.
+cache_root() { printf '%s' "${HACKS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/bgp-cloud-connector-hacks}"; }
+
+# cache_fetch <key> <dest> copies a cached file or directory to dest.
+# 0 copied, 1 not cached, 2 cached but the copy failed -- which is not a
+# miss, and a caller treating it as one would download over a broken
+# destination.
+cache_fetch() {
+    local src
+    src="$(cache_root)/$1"
+    [ -e "$src" ] || return 1
+    cp -a --reflink=auto "$src" "$2" || return 2
+}
+
+# cache_store <key> <src> copies src into the cache. The copy is staged
+# beside the entry and renamed into place, so an entry either is whole
+# or is not there: an interrupted store leaves a .staging directory,
+# never a half-written entry a later build would take as complete.
+cache_store() {
+    local dst stage
+    dst="$(cache_root)/$1"
+    mkdir -p "$(dirname "$dst")" || return 1
+    stage="$(mktemp -d "$(dirname "$dst")/.staging.XXXXXX")" || return 1
+    cp -a --reflink=auto "$2" "$stage/entry" || {
+        warn "  could not cache $1; partial copy left in $stage"
+        return 1
+    }
+    mv -T "$stage/entry" "$dst" || return 1
+    rmdir "$stage"
+}
+
 failure_count() { printf '%s' "${#_failures[@]}"; }
 
 # Final word, and the exit status. Call this last.
