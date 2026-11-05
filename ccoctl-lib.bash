@@ -65,9 +65,12 @@ extract_credential_requests() {
         info "  credential requests already extracted"
         return 0
     fi
+    # step suspends -e (see lib.bash), so every command here is checked:
+    # an unchecked extract that failed went on to report zero requests
+    # and "ok" on 2026-11-05, with the network down.
     local release_image
-    release_image="$("$installer" version | awk '/release image/ {print $3}')"
-    mkdir -p "$cluster_dir/credreqs"
+    release_image="$("$installer" version | awk '/release image/ {print $3}')" || return 1
+    mkdir -p "$cluster_dir/credreqs" || return 1
     # --included asks the payload to filter requests down to the
     # capabilities this install-config enables. It helps, but it is not
     # sufficient: measured against 4.22.8 it still emits the cluster-api
@@ -77,8 +80,8 @@ extract_credential_requests() {
     retry 3 10 oc adm release extract --credentials-requests --included \
         --install-config="$cluster_dir/install-config.yaml.bak" \
         --registry-config="$pull_secret" \
-        --cloud="$1" --to="$cluster_dir/credreqs" "$release_image"
-    drop_requests_for_disabled_capabilities
+        --cloud="$1" --to="$cluster_dir/credreqs" "$release_image" || return 1
+    drop_requests_for_disabled_capabilities || return 1
     info "  $(find "$cluster_dir/credreqs" -type f | wc -l) credential request(s)"
 }
 
@@ -135,8 +138,8 @@ drop_requests_for_disabled_capabilities() {
         gate="$(awk -F': *' '/release\.openshift\.io\/feature-gate:/{print $2; exit}' "$f")"
         [ -n "$gate" ] || continue
         info "  dropping $(basename "$f"): gated by $gate, assumed not in the default feature set"
-        mkdir -p "$cluster_dir/credreqs-dropped"
-        mv "$f" "$cluster_dir/credreqs-dropped/"
+        mkdir -p "$cluster_dir/credreqs-dropped" || return 1
+        mv "$f" "$cluster_dir/credreqs-dropped/" || return 1
         dropped=$((dropped + 1))
     done
     if [ "$dropped" -eq 0 ]; then
@@ -148,6 +151,6 @@ drop_requests_for_disabled_capabilities() {
 }
 
 merge_manifests() {
-    cp "$cluster_dir"/ccoctl-output/manifests/* "$cluster_dir/manifests/"
+    cp "$cluster_dir"/ccoctl-output/manifests/* "$cluster_dir/manifests/" || return 1
     cp -a "$cluster_dir/ccoctl-output/tls" "$cluster_dir/"
 }
