@@ -71,9 +71,9 @@ current_url="$(ocm config get url 2>/dev/null)"
 key_file="${GOOGLE_CREDENTIALS:-$HOME/.secrets/gcp-osServiceAccount.json}"
 export GOOGLE_APPLICATION_CREDENTIALS="$key_file"
 
-# ocm get exits 0 on an API error and prints an object of kind Error,
-# so the status alone cannot tell an answer from a refusal. This fails
-# on either, with what OCM said.
+# ocm get prints what OCM said and exits non-zero when OCM answers with
+# an error. This fails on that, with what OCM said, and on an answer
+# that is itself an Error object.
 ocm_api() {
     local out
     out="$(ocm get "$@" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
@@ -94,14 +94,16 @@ fi
 # Prints present or absent, or fails having said why it could not tell.
 cluster_state() {
     [ -n "$cluster_id" ] || { echo absent; return 0; }
-    # A missing cluster is an Error object with code CLUSTERS-MGMT-404
-    # (observed: "Cluster '<id>' not found"); anything else is not an
-    # answer.
-    local out kind code
-    out="$(ocm get "/api/clusters_mgmt/v1/clusters/$cluster_id" 2>&1)" || { warn "  ocm get failed:"; explain "$out"; return 1; }
+    # A missing cluster is OCM's answer, not a failure to ask: ocm get
+    # exits 1 and prints an Error object with code CLUSTERS-MGMT-404
+    # ("Cluster '<id>' not found"), observed 2026-11-06. So the exit
+    # status alone cannot be the test; anything other than a Cluster or
+    # that 404 is not an answer.
+    local out kind code rc=0
+    out="$(ocm get "/api/clusters_mgmt/v1/clusters/$cluster_id" 2>&1)" || rc=$?
     kind="$(jq -r '.kind // empty' <<<"$out" 2>/dev/null)"
     code="$(jq -r '.code // empty' <<<"$out" 2>/dev/null)"
-    if [ "$kind" = Cluster ]; then
+    if [ "$rc" -eq 0 ] && [ "$kind" = Cluster ]; then
         echo present
     elif [ "$kind" = Error ] && [ "$code" = CLUSTERS-MGMT-404 ]; then
         echo absent

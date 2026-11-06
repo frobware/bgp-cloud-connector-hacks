@@ -73,9 +73,9 @@ wif_name="$cluster_name"
 export GOOGLE_APPLICATION_CREDENTIALS="$key_file"
 export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$key_file"
 
-# ocm get exits 0 on an API error and prints an object of kind Error,
-# so the status alone cannot tell an answer from a refusal. This fails
-# on either, with what OCM said.
+# ocm get prints what OCM said and exits non-zero when OCM answers with
+# an error. This fails on that, with what OCM said, and on an answer
+# that is itself an Error object.
 ocm_api() {
     local out
     out="$(ocm get "$@" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
