@@ -36,6 +36,7 @@
             azure-cli # az, for the azure- scripts
             google-cloud-sdk # gcloud, for the gcp- scripts
             rosa # for the rosa- scripts
+            ocm # for the osd- scripts: rosa cannot build OSD on GCP
             openshift # oc
             jq
             pass # reads the account id from a pass entry
