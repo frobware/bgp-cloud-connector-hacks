@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+#
+# Tear down a cluster built by osd-create-cluster.
+#
+#   CLUSTER=$PWD/clusters/2611061300-osd-gcp-wif-OCP-4.22.18 osd-destroy-cluster --dry-run
+#   CLUSTER=$PWD/clusters/2611061300-osd-gcp-wif-OCP-4.22.18 osd-destroy-cluster
+#
+# The reverse of the create:
+#
+#   1. the cluster, with ocm delete cluster, waiting until OCM no longer
+#      knows it. OCM removes the cluster's GCP resources itself.
+#   2. the wif-config, with ocm gcp delete wif-config --mode auto, which
+#      removes the pool, its provider, and the service accounts and roles
+#      it made. OCM refuses while a cluster still uses it, so this waits
+#      for the cluster to be gone.
+#
+# The cluster is treated as gone only when OCM answers that it has no
+# cluster with that id. Any other failure to look is not evidence of
+# absence, and deleting the wif-config on the strength of it would leave
+# a cluster OCM can no longer act for.
+#
+# Not removed here: the bgp-cloud-connector operator's own GCP identity,
+# made by that repo's hack/gcp/create-operator-identity.sh, which OCM
+# knows nothing about. Remove it first with delete-operator-identity.sh;
+# it works from INFRA and GCP_PROJECT after the cluster has gone too.
+# The command is printed below.
+#
+# Every name comes from cluster-facts, written before anything existed.
+# Both phases run even if the first failed; the second waits for the
+# cluster to be gone. The directory stays.
+
+set -euo pipefail
+
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gcp-lib.bash"
+
+parse_args_only_common "$@"
+require_cmd ocm jq
+
+[ -n "${CLUSTER:-}" ] || die "CLUSTER is not set" \
+    "Point it at the cluster directory:" \
+    "  CLUSTER=\$PWD/clusters/<YYMMDDHHMM>-osd-gcp-wif-OCP-<version> ${0##*/}"
+
+facts="$CLUSTER/cluster-facts"
+[ -f "$facts" ] || die "no cluster-facts in $CLUSTER"
+
+read_fact() {
+    awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1"
+}
+
+cloud="$(read_fact "$facts" cloud)"
+[ "$cloud" = "osd-gcp" ] || die "this cluster directory belongs to ${cloud:-an unknown cloud}" \
+    "Use the matching destroy script instead."
+
+cluster_name="$(read_fact "$facts" cluster_name)"
+wif_name="$(read_fact "$facts" wif_name)"
+cluster_id="$(read_fact "$facts" cluster_id)"
+gcp_project="$(read_fact "$facts" gcp_project)"
+ocm_url="$(read_fact "$facts" ocm_url)"
+
+for k in cluster_name wif_name gcp_project; do
+    [ -n "${!k}" ] || die "cluster-facts has no $k" "It is written by osd-create-cluster; is $facts one of its?"
+done
+
+ocm whoami >/dev/null 2>&1 || die "not logged in to OCM" "  ocm login --use-device-code --url $ocm_url"
+current_url="$(ocm config get url 2>/dev/null)"
+[ -z "$ocm_url" ] || [ "$current_url" = "$ocm_url" ] || die "logged in to $current_url" \
+    "The cluster was built through $ocm_url. Log in there."
+
+# ocm's GCP client uses Application Default Credentials to delete what
+# the wif-config made.
+key_file="${GOOGLE_CREDENTIALS:-$HOME/.secrets/gcp-osServiceAccount.json}"
+export GOOGLE_APPLICATION_CREDENTIALS="$key_file"
+
+# ocm get exits 0 on an API error and prints an object of kind Error,
+# so the status alone cannot tell an answer from a refusal. This fails
+# on either, with what OCM said.
+ocm_api() {
+    local out
+    out="$(ocm get "$@" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+    if jq -e '.kind == "Error"' <<<"$out" >/dev/null 2>&1; then
+        printf '%s\n' "$out" >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+
+# A create that died before OCM accepted the cluster recorded no id; ask
+# OCM by name in case it got further than the facts say.
+if [ -z "$cluster_id" ]; then
+    cluster_id="$(ocm_api /api/clusters_mgmt/v1/clusters --parameter search="name = '$cluster_name'" | jq -r '.items[0].id // empty')" ||
+        die "could not ask OCM for a cluster named $cluster_name"
+fi
+
+# Prints present or absent, or fails having said why it could not tell.
+cluster_state() {
+    [ -n "$cluster_id" ] || { echo absent; return 0; }
+    # A missing cluster is an Error object with code CLUSTERS-MGMT-404
+    # (observed: "Cluster '<id>' not found"); anything else is not an
+    # answer.
+    local out kind code
+    out="$(ocm get "/api/clusters_mgmt/v1/clusters/$cluster_id" 2>&1)" || { warn "  ocm get failed:"; explain "$out"; return 1; }
+    kind="$(jq -r '.kind // empty' <<<"$out" 2>/dev/null)"
+    code="$(jq -r '.code // empty' <<<"$out" 2>/dev/null)"
+    if [ "$kind" = Cluster ]; then
+        echo present
+    elif [ "$kind" = Error ] && [ "$code" = CLUSTERS-MGMT-404 ]; then
+        echo absent
+    else
+        warn "  could not tell whether cluster $cluster_id exists:"
+        explain "$out"
+        return 1
+    fi
+}
+
+cluster_gone() { [ "$(cluster_state)" = absent ]; }
+
+delete_cluster() {
+    local state
+    state="$(cluster_state)" || return 1
+    if [ "$state" = absent ]; then
+        info "  no cluster ${cluster_id:-named $cluster_name}"
+        return 0
+    fi
+    try ocm delete cluster "$cluster_id" || return 1
+    [ "$dry_run" = true ] && return 0
+    wait_until 3600 60 "OCM to finish deleting $cluster_name" cluster_gone
+}
+
+wif_ids() {
+    ocm_api /api/clusters_mgmt/v1/gcp/wif_configs --parameter search="display_name = '$wif_name'" | jq -r '.items[]?.id'
+}
+
+delete_wif_config() {
+    if [ "$dry_run" = false ] && ! cluster_gone; then
+        warn "  the cluster is still there, and OCM will not delete a wif-config in use"
+        return 1
+    fi
+    local ids id
+    ids="$(wif_ids)" || return 1
+    if [ -z "$ids" ]; then
+        info "  no wif-config named $wif_name"
+        return 0
+    fi
+    for id in $ids; do
+        try ocm gcp delete wif-config "$id" --mode auto || return 1
+    done
+}
+
+audit() {
+    if [ "$dry_run" = true ]; then
+        info "  (skipped: nothing was deleted)"
+        return 0
+    fi
+    local left=false state ids
+    state="$(cluster_state)" || return 1
+    [ "$state" = absent ] || { warn "  cluster     $cluster_id"; left=true; }
+    ids="$(wif_ids)" || return 1
+    [ -z "$ids" ] || { warn "  wif-config  $ids"; left=true; }
+    [ "$left" = false ] || return 1
+    info "  nothing"
+}
+
+infra_id="$(read_fact "$facts" infra_id)"
+
+info "Cluster:     $cluster_name (${cluster_id:-no id recorded}) in $gcp_project"
+info "WIF config:  $wif_name"
+info ""
+info "If the bgp-cloud-connector operator was given its own GCP identity on"
+info "this cluster, this does not remove it. From that repo:"
+info "  INFRA=${infra_id:-<infra id>} GCP_PROJECT=$gcp_project hack/gcp/delete-operator-identity.sh"
+info ""
+
+phase "cluster"      delete_cluster
+phase "wif-config"   delete_wif_config
+phase "remaining"    audit
+
+info "Cloud resources only. This directory is untouched:"
+info "  $CLUSTER"
+report

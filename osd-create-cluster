@@ -1,0 +1,489 @@
+#!/usr/bin/env bash
+#
+# Build an OpenShift Dedicated cluster on GCP, Customer Cloud
+# Subscription, authenticated by workload identity federation (WIF),
+# checking things first.
+#
+#   osd-create-cluster --dry-run
+#   osd-create-cluster
+#
+# OSD is not built by openshift-install. OCM, Red Hat's service behind
+# console.redhat.com, builds it in your GCP project, and the ocm CLI is
+# OCM's client. With WIF nothing in the cluster holds a long-lived key:
+# OCM acts through service accounts it impersonates via a workload
+# identity pool in the project. So this script:
+#
+#   1. creates a wif-config (ocm gcp create wif-config --mode auto),
+#      which makes that pool, its provider, and the service accounts and
+#      custom roles OSD's own components use, then records it in OCM
+#   2. asks OCM to validate the cluster request (ocm create cluster
+#      --dry-run), which is where missing quota or billing shows up,
+#      before an hour's wait
+#   3. creates the cluster and waits for it
+#   4. adds an htpasswd identity provider with one user in the
+#      cluster-admins group, and logs in as it to write auth/kubeconfig
+#
+# Two things must already hold, and the preflight checks both: you are
+# logged in to OCM (ocm login --use-device-code), and the GCP project
+# has the APIs OSD needs. WIF on OSD needs 4.17 or later and is only
+# supported on CCS, which is what this builds.
+#
+# The wif-config takes the cluster's name, <user>-<YYMMDDHHMM>, so a
+# failed attempt leaves nothing a second attempt collides with.
+# Retrying means running again.
+#
+# Environment:
+#
+#   CLUSTER_USER        default $USER
+#   CLUSTER             cluster directory, default clusters/<YYMMDDHHMM>-osd-gcp-wif-OCP-<version>
+#   GCP_PROJECT         required, from .envrc.local
+#   GOOGLE_CREDENTIALS  service-account key ocm's GCP client uses to make
+#                       the wif-config, default ~/.secrets/gcp-osServiceAccount.json
+#   OSD_VERSION         X.Y.Z, or X.Y for its latest patch; default the
+#                       latest the stable channel offers
+#   OSD_REGION          default us-east1
+#   OSD_COMPUTE_NODES   default 3
+#   OSD_SUBSCRIPTION    standard (OSD quota in your OCM organisation) or
+#                       marketplace-gcp (billed through GCP Marketplace,
+#                       which needs the terms accepted in the project);
+#                       default standard. On 2026-11-06 the organisation
+#                       I used in production OCM had OSD-on-GCP
+#                       CCS quota only for marketplace-gcp.
+
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+source "$here/gcp-lib.bash"
+
+parse_args_only_common "$@"
+
+region="${OSD_REGION:-us-east1}"
+compute_nodes="${OSD_COMPUTE_NODES:-3}"
+subscription="${OSD_SUBSCRIPTION:-standard}"
+channel_group=stable
+key_file="${GOOGLE_CREDENTIALS:-$HOME/.secrets/gcp-osServiceAccount.json}"
+
+short_name="$(date +%y%m%d%H%M)"
+cluster_user="${CLUSTER_USER:-${USER:-$(whoami)}}"
+cluster_name="$cluster_user-$short_name"
+wif_name="$cluster_name"
+
+# ocm's GCP client uses Application Default Credentials, and gcloud
+# here is pointed at the same key, so both act as one identity.
+export GOOGLE_APPLICATION_CREDENTIALS="$key_file"
+export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$key_file"
+
+# ocm get exits 0 on an API error and prints an object of kind Error,
+# so the status alone cannot tell an answer from a refusal. This fails
+# on either, with what OCM said.
+ocm_api() {
+    local out
+    out="$(ocm get "$@" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+    if jq -e '.kind == "Error"' <<<"$out" >/dev/null 2>&1; then
+        printf '%s\n' "$out" >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+
+# The versions OCM will build: enabled, enabled for WIF, and with an
+# amd64 release image. ocm list versions offers more than that -- on
+# staging, 2026-11-06, the newest two 4.22 patches had only a multi-arch
+# image and the dry run refused them ("does not have release image for
+# amd64 architecture"). X.Y resolves to its latest patch, and the
+# resolved version is what the directory, the wif-config and the create
+# all use, so they cannot disagree.
+buildable_versions() {
+    ocm_api /api/clusters_mgmt/v1/versions \
+        --parameter search="channel_group = '$channel_group' and enabled = 'true' and wif_enabled = 'true'" \
+        --parameter size=500 |
+        jq -r '.items[] | select((.release_image // "") != "") | .raw_id'
+}
+
+resolve_osd_version() {
+    local want="${OSD_VERSION:-}" available
+    available="$(buildable_versions)" || return 1
+    if [ -z "$want" ]; then
+        printf '%s\n' "$available" | sort -V | tail -1
+    elif [[ "$want" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        printf '%s\n' "$available" | grep -F "$want." | sort -V | tail -1
+    else
+        printf '%s\n' "$available" | grep -xF "$want"
+    fi
+}
+
+require_cmd ocm gcloud oc jq openssl
+[ -n "${GCP_PROJECT:-}" ] || die "GCP_PROJECT is not set" \
+    "Name the project, e.g. in .envrc.local:" \
+    "  export GCP_PROJECT=<project-id>"
+ocm whoami >/dev/null 2>&1 || die "not logged in to OCM" \
+    "  ocm login --use-device-code"
+
+ocp_version="$(resolve_osd_version || true)"
+[ -n "$ocp_version" ] || die "no OSD version ${OSD_VERSION:+matching $OSD_VERSION }on the $channel_group channel" \
+    "Buildable: $(buildable_versions 2>/dev/null | sort -V | tail -5 | tr '\n' ' ')"
+y_stream="${ocp_version%.*}"
+
+cluster_dir="${CLUSTER:-$here/clusters/$short_name-osd-gcp-wif-OCP-$ocp_version}"
+
+# ---------------------------------------------------------------------
+# Predicates
+# ---------------------------------------------------------------------
+
+key_file_readable() { [ -r "$key_file" ] || { printf 'cannot read %s\n' "$key_file"; return 1; }; }
+
+project_readable() { gcloud projects describe "$GCP_PROJECT" --format='value(projectId)' >/dev/null; }
+
+# The APIs the OSD docs list for a CCS project. The marketplace one is
+# only needed for marketplace-gcp billing.
+apis_enabled() {
+    local enabled want missing=()
+    enabled="$(gcloud services list --enabled --project "$GCP_PROJECT" --format='value(config.name)')" || return 1
+    for want in cloudapis cloudresourcemanager compute deploymentmanager dns iam iamcredentials \
+        iap networksecurity orgpolicy servicemanagement serviceusage; do
+        grep -qx "$want.googleapis.com" <<<"$enabled" || missing+=("$want.googleapis.com")
+    done
+    if [ "$subscription" = marketplace-gcp ]; then
+        grep -qx cloudcommerceconsumerprocurement.googleapis.com <<<"$enabled" ||
+            missing+=(cloudcommerceconsumerprocurement.googleapis.com)
+    fi
+    [ ${#missing[@]} -eq 0 ] && return 0
+    printf 'not enabled: %s\n' "${missing[*]}"
+    return 1
+}
+
+# OCM's API rather than ocm's tables, whose columns are for reading.
+cluster_ids_named() {
+    ocm_api /api/clusters_mgmt/v1/clusters --parameter search="name = '$1'" | jq -r '.items[]?.id'
+}
+
+wif_ids_named() {
+    ocm_api /api/clusters_mgmt/v1/gcp/wif_configs --parameter search="display_name = '$1'" | jq -r '.items[]?.id'
+}
+
+cluster_name_free() {
+    local ids
+    ids="$(cluster_ids_named "$1")" || return 1
+    [ -z "$ids" ] && return 0
+    printf 'exists: %s\n' "$ids"
+    return 1
+}
+
+wif_name_free() {
+    local ids
+    ids="$(wif_ids_named "$1")" || return 1
+    [ -z "$ids" ] && return 0
+    printf 'exists: %s\n' "$ids"
+    return 1
+}
+
+# OSD CCS is counted against a cluster|byoc|osd quota. Marketplace
+# billing has its own, cluster|byoc|osd|gcp|marketplace (production
+# OCM, 2026-11-06); standard billing draws on
+# cluster|byoc|osd, which names no cloud (staging OCM, same
+# organisation, same day), or on a cluster|byoc|osd|gcp| quota that is
+# not the marketplace one.
+# OCM has the last word in the dry run; this says early, and says what
+# the organisation does have, when the answer is going to be no.
+quota_available() {
+    local org quota want
+    org="$(ocm whoami | jq -r '.organization.id // empty')" || return 1
+    [ -n "$org" ] || { printf 'no organisation in ocm whoami\n'; return 1; }
+    quota="$(ocm_api "/api/accounts_mgmt/v1/organizations/$org/quota_cost")" || return 1
+    if [ "$subscription" = marketplace-gcp ]; then
+        want='.quota_id == "cluster|byoc|osd|gcp|marketplace"'
+    else
+        want='.quota_id == "cluster|byoc|osd" or ((.quota_id | startswith("cluster|byoc|osd|gcp|")) and (.quota_id | endswith("|marketplace") | not))'
+    fi
+    jq -e "[.items[] | select($want) | select(.allowed > .consumed)] | length > 0" <<<"$quota" >/dev/null && return 0
+    printf 'no %s OSD-on-GCP CCS quota free; the organisation has:\n' "$subscription"
+    jq -r '.items[] | select(.quota_id | startswith("cluster|byoc|osd")) | "  \(.quota_id) allowed=\(.allowed) consumed=\(.consumed)"' <<<"$quota"
+    return 1
+}
+
+subscription_known() {
+    case "$subscription" in standard|marketplace-gcp) return 0 ;; esac
+    printf 'OSD_SUBSCRIPTION is %s; want standard or marketplace-gcp\n' "$subscription"
+    return 1
+}
+
+version_has_wif() {
+    local major minor
+    IFS=. read -r major minor _ <<<"$ocp_version"
+    [ "$major" -gt 4 ] || [ "$minor" -ge 17 ] && return 0
+    printf 'WIF needs 4.17 or later, not %s\n' "$ocp_version"
+    return 1
+}
+
+cluster_dir_free() { [ ! -e "$1/cluster-facts" ]; }
+
+dir_is_empty() { [ ! -d "$1" ] || [ -z "$(ls -A "$1" 2>/dev/null)" ]; }
+
+name_is_rfc1035() { printf '%s' "$1" | grep -qE '^[a-z]([-a-z0-9]*[a-z0-9])?$'; }
+
+# OCM caps a cluster name at 54 characters.
+name_short_enough() { [ "${#1}" -le 54 ]; }
+
+# ---------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------
+
+facts_file() { printf '%s' "$cluster_dir/cluster-facts"; }
+
+# Written before anything exists, so a create that dies at any point
+# leaves the names teardown needs. Ids learned later are appended.
+write_cluster_facts() {
+    mkdir -p "$cluster_dir"
+    cat > "$(facts_file)" <<EOF
+# Written by osd-create-cluster. Survives teardown on purpose.
+cloud=osd-gcp
+cluster_name=$cluster_name
+wif_name=$wif_name
+gcp_project=$GCP_PROJECT
+region=$region
+ocm_url=$(ocm config get url 2>/dev/null)
+ocp_version=$ocp_version
+cluster_dir=$cluster_dir
+EOF
+    info "  wrote $(facts_file)"
+}
+
+record_fact() {
+    grep -q "^$1=" "$(facts_file)" 2>/dev/null && return 0
+    printf '%s=%s\n' "$1" "$2" >> "$(facts_file)"
+    info "  recorded $1=$2"
+}
+
+write_cluster_envrc() {
+    mkdir -p "$cluster_dir"
+    cat > "$cluster_dir/.envrc" <<'EOF'
+# Written by osd-create-cluster. Keeps the repo's flake shell, then
+# points oc at this cluster.
+source_up_if_exists
+export KUBECONFIG="$PWD/auth/kubeconfig"
+EOF
+    if command -v direnv >/dev/null 2>&1 && direnv allow "$cluster_dir" 2>/dev/null; then
+        info "  wrote and allowed $cluster_dir/.envrc"
+    else
+        info "  wrote $cluster_dir/.envrc (run direnv allow, or export KUBECONFIG)"
+    fi
+}
+
+create_wif_config() {
+    ocm gcp create wif-config --name "$wif_name" --project "$GCP_PROJECT" \
+        --mode auto --version "$y_stream" || return 1
+    local id
+    id="$(wif_ids_named "$wif_name" | head -1)" || return 1
+    [ -n "$id" ] || { warn "  no wif-config named $wif_name after creating it"; return 1; }
+    record_fact wif_config_id "$id"
+}
+
+cluster_args() {
+    printf '%s\n' "$cluster_name" --provider gcp --ccs \
+        --wif-config "$wif_name" \
+        --region "$region" --version "$ocp_version" --channel-group "$channel_group" \
+        --compute-nodes "$compute_nodes" \
+        --subscription-type "$subscription"
+    if [ "$subscription" = marketplace-gcp ]; then
+        printf '%s\n' --marketplace-gcp-terms
+    fi
+}
+
+validate_cluster() {
+    local args
+    mapfile -t args < <(cluster_args)
+    ocm create cluster "${args[@]}" --dry-run
+}
+
+create_cluster() {
+    local args id
+    mapfile -t args < <(cluster_args)
+    ocm create cluster "${args[@]}" || return 1
+    id="$(cluster_ids_named "$cluster_name" | head -1)" || return 1
+    [ -n "$id" ] || return 1
+    record_fact cluster_id "$id"
+}
+
+cluster_id() { grep '^cluster_id=' "$(facts_file)" | cut -d= -f2; }
+
+cluster_json() { ocm_api "/api/clusters_mgmt/v1/clusters/$(cluster_id)"; }
+
+# Ready, or a reason to stop: an error state does not become ready by
+# waiting, and wait_until would otherwise sit out its whole timeout.
+cluster_state=""
+cluster_settled() {
+    cluster_state="$(cluster_json | jq -r '.state // empty')" || return 1
+    info "  state: ${cluster_state:-unknown}"
+    [ "$cluster_state" = ready ] || [ "$cluster_state" = error ]
+}
+
+wait_for_cluster() {
+    wait_until 7200 60 "the cluster to be ready" cluster_settled || return 1
+    if [ "$cluster_state" = ready ]; then
+        record_fact infra_id "$(cluster_json | jq -r '.infra_id // empty')"
+        return 0
+    fi
+    ocm describe cluster "$(cluster_id)" >&2
+    return 1
+}
+
+# OCM's htpasswd rules: at least 14 characters with upper and lower case
+# and a digit or symbol. The fixed tail guarantees the classes.
+generate_password() {
+    printf '%sAa9' "$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
+}
+
+api_url() { cluster_json | jq -r '.api.url // empty'; }
+
+# A new htpasswd user takes minutes to reach the OAuth server; retried,
+# not slept. The password goes on oc's command line because oc login
+# has no other non-interactive way to take it.
+login_as_admin() {
+    oc login "$(api_url)" --username cluster-admin --password "$(cat "$cluster_dir/auth/kubeadmin-password")" \
+        --kubeconfig "$cluster_dir/auth/kubeconfig" --insecure-skip-tls-verify=false >/dev/null 2>&1
+}
+
+create_admin() {
+    mkdir -p "$cluster_dir/auth"
+    ( umask 077; generate_password > "$cluster_dir/auth/kubeadmin-password" )
+    ocm create idp --cluster "$(cluster_id)" --type htpasswd --name htpasswd \
+        --username cluster-admin --password "$(cat "$cluster_dir/auth/kubeadmin-password")" >/dev/null || return 1
+    ocm create user cluster-admin --cluster "$(cluster_id)" --group cluster-admins || return 1
+    wait_until 1800 30 "the cluster-admin login to work" login_as_admin || return 1
+    chmod 600 "$cluster_dir/auth/kubeconfig"
+    info "  wrote $cluster_dir/auth/kubeconfig and kubeadmin-password"
+    # The login works before the group membership reaches the API
+    # server, so a login is not yet an admin; CI's
+    # osd-ccs-conf-idp-htpasswd waits on the group for the same reason.
+    wait_until 1800 30 "cluster-admin to be granted" is_cluster_admin
+}
+
+cluster_oc() { KUBECONFIG="$cluster_dir/auth/kubeconfig" oc "$@"; }
+
+is_cluster_admin() { [ "$(cluster_oc auth can-i '*' '*' --all-namespaces 2>/dev/null)" = yes ]; }
+
+workers_ready() {
+    local n
+    n="$(cluster_oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/infra' -o json 2>/dev/null | jq '[.items[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))] | length')" || return 1
+    info "  $n/$compute_nodes workers Ready"
+    [ "$n" -ge "$compute_nodes" ]
+}
+
+# Conditions, never columns; see CLAUDE.md.
+operators_unavailable() {
+    cluster_oc get co -o json 2>/dev/null \
+        | jq -r '[.items[] | select(([(.status.conditions // [])[]
+            | select(.type=="Available") | .status] | first) != "True")
+            | .metadata.name] | join(" ")'
+}
+
+all_operators_available() {
+    local bad total
+    total="$(cluster_oc get co -o json 2>/dev/null | jq -r '.items | length')"
+    [ -n "$total" ] && [ "$total" != 0 ] || return 1
+    bad="$(operators_unavailable)"
+    if [ -z "$bad" ]; then
+        info "  $total/$total operators Available"
+        return 0
+    fi
+    info "  waiting on: $bad"
+    return 1
+}
+
+# About fifty minutes after install OSD moves the API to a Let's
+# Encrypt certificate, and while kube-apiserver rolls that out some
+# requests reach a server still presenting the cluster's own signer,
+# which this kubeconfig does not trust (x509: certificate signed by
+# unknown authority), and reads can disagree. Observed 2026-11-06.
+# Nothing settled is reported until no operator is progressing, which
+# is also what CI's osd-ccs-cluster-operators-wait-ready waits for.
+# A failed read is not an empty answer: an unreachable cluster would
+# otherwise read as one with nothing progressing.
+operators_progressing() {
+    local co
+    co="$(cluster_oc get co -o json 2>/dev/null)" || return 1
+    jq -r '[.items[] | select(([(.status.conditions // [])[]
+            | select(.type=="Progressing") | .status] | first) == "True")
+            | .metadata.name] | join(" ")' <<<"$co"
+}
+
+no_operator_progressing() {
+    local busy
+    busy="$(operators_progressing)" || return 1
+    [ -z "$busy" ] && return 0
+    info "  still progressing: $busy"
+    return 1
+}
+
+verify_cluster() {
+    wait_until 1800 30 "$compute_nodes workers to be Ready" workers_ready || return 1
+    wait_until 1800 30 "every cluster operator to become Available" all_operators_available || return 1
+    wait_until 3600 30 "every cluster operator to stop progressing" no_operator_progressing
+}
+
+# ---------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------
+
+info "Cluster:     $cluster_name ($ocp_version, $region, $compute_nodes workers, $subscription)"
+info "WIF config:  $wif_name"
+info "OCM:         $(ocm config get url 2>/dev/null) as $(ocm whoami 2>/dev/null | jq -r '.username // empty')"
+info "Directory:   $cluster_dir"
+info ""
+
+info "--- preflight ---"
+check "subscription type is known"            subscription_known
+check "$ocp_version supports WIF"             version_has_wif
+check "key file readable"                     key_file_readable
+check "project readable with that key"        project_readable
+check "project has the APIs OSD needs"        apis_enabled
+check "OCM organisation has $subscription quota" quota_available
+check "cluster directory unused"              cluster_dir_free "$cluster_dir"
+check "cluster directory is empty"            dir_is_empty "$cluster_dir"
+check "name is RFC 1035 valid"                name_is_rfc1035 "$cluster_name"
+check "name within 54 characters"             name_short_enough "$cluster_name"
+check "no cluster named $cluster_name"        cluster_name_free "$cluster_name"
+check "no wif-config named $wif_name"         wif_name_free "$wif_name"
+abort_if_failed
+info ""
+
+if [ "$dry_run" = true ]; then
+    info "Would create $cluster_name in $region."
+    info "OCM validates quota and billing only once the wif-config exists, so a"
+    info "dry run cannot tell you whether the create will be accepted."
+    report
+    exit $?
+fi
+
+on_exit() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ -f "$(facts_file)" ]; then
+        warn ""
+        warn "Failed partway through. To remove what exists:"
+        warn "  CLUSTER=$cluster_dir osd-destroy-cluster"
+    fi
+}
+trap on_exit EXIT
+
+step "cluster .envrc"        write_cluster_envrc
+step "cluster facts"         write_cluster_facts
+step "wif-config"            create_wif_config
+step "validate request"      validate_cluster
+step "create cluster"        create_cluster
+step "wait for cluster"      wait_for_cluster
+step "cluster admin"         create_admin
+# phase, not step: a cluster with a slow operator is still a cluster
+# you want to keep and look at.
+phase "verify cluster"       verify_cluster
+
+trap - EXIT
+
+info ""
+info "Cluster:    $cluster_name ($(cluster_id))"
+info "Kubeconfig: $cluster_dir/auth/kubeconfig"
+info "            export KUBECONFIG=$cluster_dir/auth/kubeconfig"
+info "Password:   $cluster_dir/auth/kubeadmin-password (user cluster-admin)"
+info ""
+info "Tear it down with:"
+info "  CLUSTER=$cluster_dir osd-destroy-cluster"
+report

@@ -52,6 +52,8 @@
 !aro-hcp-destroy-cluster
 !rosa-create-cluster
 !rosa-destroy-cluster
+!osd-create-cluster
+!osd-destroy-cluster
 !gcp-create-cloud-router
 !gcp-delete-cloud-router
 !gcp-list-cloud-router
