@@ -204,6 +204,7 @@ echo "Will delete:"
 if [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
     echo "  the cluster ${infra:-$cluster_name}, via openshift-install destroy"
     echo "  (its resource group and the base domain's record sets go with it)"
+    echo "  any of those record sets destroy leaves, by their owned tag"
 elif [ -n "$infra" ]; then
     echo "  nothing: without metadata.json there is nothing for the"
     echo "  installer to destroy from, so this run only audits what"
@@ -228,7 +229,11 @@ echo
 # <infra>-rg, and destroy removes the group and the DNS records it
 # added.
 echo "--- cluster ---"
+# destroy removes metadata.json when it succeeds, so phase 3 cannot
+# ask the same question afterwards.
+destroyed=false
 if [ -n "${CLUSTER:-}" ] && [ -f "${CLUSTER}/metadata.json" ]; then
+    destroyed=true
     if [ ! -f "$creds_file" ]; then
         fail "no service principal at $creds_file, cannot run destroy"
     elif ! AZURE_AUTH_LOCATION="$creds_file" \
@@ -282,7 +287,40 @@ if [ "$manual" = true ]; then
     echo
 fi
 
-# Phase 3. Say what is actually left rather than trusting the above.
+# Phase 3. The base domain's two record sets, api.<name> and
+# *.apps.<name>. destroy normally takes them, but on 2026-11-10 it ran
+# against a cluster whose resource group was already gone, finished in
+# 11s and left both. Only record sets the installer tagged as owned by
+# this infra id are touched, so another cluster's cannot be. Same
+# predicate as the cluster phase: named mode audits and deletes nothing.
+if [ "$destroyed" = true ] && [ -n "$infra" ]; then
+    echo "--- dns ---"
+    if [ -n "$base_domain" ] && [ -z "$base_domain_rg" ]; then
+        base_domain_rg="$(zone_resource_group "$base_domain" 2>/dev/null || true)"
+    fi
+    if [ -z "$base_domain" ] || [ -z "$base_domain_rg" ]; then
+        fail "no base domain and group known, cannot look for record sets"
+    elif ! records="$(az network dns record-set list --subscription "$subscription" \
+            -g "$base_domain_rg" -z "$base_domain" \
+            --query "[?metadata.\"kubernetes.io_cluster.${infra}\"=='owned'].[type,name]" \
+            -o tsv 2>/dev/null)"; then
+        fail "could not list record sets in $base_domain"
+    elif [ -z "$records" ]; then
+        echo "  none left"
+    else
+        while read -r type name; do
+            [ -n "$name" ] || continue
+            # Microsoft.Network/dnszones/CNAME -> cname
+            kind="${type##*/}"
+            try az network dns record-set "${kind,,}" delete --subscription "$subscription" \
+                -g "$base_domain_rg" -z "$base_domain" -n "$name" --yes \
+                || fail "az network dns record-set ${kind,,} delete $name"
+        done <<< "$records"
+    fi
+    echo
+fi
+
+# Phase 4. Say what is actually left rather than trusting the above.
 # After a clean destroy every listing here comes back empty. Matching is
 # on the infra id, which itself starts "<name>-", so nothing here can
 # catch another cluster's resources: the timestamp in the name sees to
