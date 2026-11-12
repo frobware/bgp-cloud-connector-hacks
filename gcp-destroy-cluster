@@ -12,9 +12,16 @@
 # service accounts are keyed on the infra id and the cloud credential
 # operator deletes them during destroy, so there is no residue phase
 # -- only a "remaining" check afterwards, because trusting that claim
-# without looking is how orphans happen. Route servers have no GCP
-# equivalent yet either; the Cloud Router side arrives with the
-# bgp-cloud-connector work.
+# without looking is how orphans happen.
+#
+# The BGP side is the exception, and it goes first. The installer
+# knows nothing of NCC, and GCP will not delete an instance that a
+# router appliance spoke still links, so a spoke left on the hub makes
+# destroy stop that instance and then retry its deletion -- and the
+# subnet's and network's behind it -- for as long as you let it. One
+# spoke held a destroy for 1h38m on 2026-11-10. gcp-delete-cloud-router
+# --delete-spokes removes the Cloud Router, every spoke on the hub, the
+# hub and the firewall rule before the installer runs.
 #
 # A WIF cluster (gcp-create-cluster with GCP_WIF=1) has a second
 # half the installer never learns about: ccoctl's workload identity
@@ -78,6 +85,7 @@ fi
 
 cluster_name="${CLUSTER_NAME:-}"
 infra="${INFRA:-}"
+region="${GCP_REGION:-}"
 base_domain="${GCP_BASE_DOMAIN:-}"
 wif_name="${WIF_NAME:-}"
 
@@ -92,6 +100,7 @@ facts="${CLUSTER:-}/cluster-facts"
 if [ -f "$facts" ]; then
     [ -n "$cluster_name" ] || cluster_name="$(read_fact "$facts" cluster_name)"
     [ -n "$infra" ] || infra="$(read_fact "$facts" infra_id)"
+    [ -n "$region" ] || region="$(read_fact "$facts" region)"
     [ -n "$base_domain" ] || base_domain="$(read_fact "$facts" base_domain)"
     # The facts value beats the ambient GCP_PROJECT. The README has
     # you export GCP_PROJECT permanently, so an env-first default
@@ -118,6 +127,7 @@ if [ -z "$cluster_name" ] || [ -z "$infra" ]; then
         # filters hunting resources named null-*.
         [ -n "$cluster_name" ] || cluster_name="$(jq -r '.clusterName // empty' "$metadata")"
         [ -n "$infra" ] || infra="$(jq -r '.infraID // empty' "$metadata")"
+        [ -n "$region" ] || region="$(jq -r '.gcp.region // empty' "$metadata")"
         # Same precedence as the facts file: the cluster's own record
         # of its project beats whatever the environment carries.
         md_project="$(jq -r '.gcp.projectID // empty' "$metadata")"
@@ -204,6 +214,9 @@ echo
 # Keyed on the same predicate as the deletion phase below, or the
 # banner promises a destroy that named mode never runs.
 echo "Will delete:"
+if [ -n "$infra" ] && [ -n "$region" ]; then
+    echo "  any Cloud Router, NCC spokes and hub for $infra, via gcp-delete-cloud-router"
+fi
 if [ -n "$wif_name" ]; then
     echo "  workload identity pool $wif_name and its service accounts, via ccoctl"
 fi
@@ -219,7 +232,30 @@ elif [ -z "$wif_name" ]; then
 fi
 echo
 
-# Phase 1. The cluster. Everything a GCP cluster owns hangs off the
+# Phase 1. The BGP side, which has to be gone before the installer
+# deletes instances; see the header. gcp-delete-cloud-router says
+# "Nothing to do" and succeeds on a cluster that never had any. With
+# no region it cannot look, so say so rather than skipping in silence.
+echo "--- bgp ---"
+if [ -z "$infra" ]; then
+    echo "  no infra id, the install never created a cluster"
+elif [ -z "$region" ]; then
+    fail "no region in cluster-facts, metadata.json or GCP_REGION, cannot look for NCC spokes"
+else
+    delete_args=(--delete-spokes)
+    if [ "$dry_run" = true ]; then
+        delete_args+=(--dry-run)
+    fi
+    if ! INFRA="$infra" GCP_REGION="$region" GCP_PROJECT="$GCP_PROJECT" \
+            GOOGLE_CREDENTIALS="$key_file" \
+            "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gcp-delete-cloud-router" \
+            "${delete_args[@]}"; then
+        fail "gcp-delete-cloud-router"
+    fi
+fi
+echo
+
+# Phase 2. The cluster. Everything a GCP cluster owns hangs off the
 # infra id and destroy knows how to find it, service accounts
 # included.
 echo "--- cluster ---"
@@ -235,7 +271,7 @@ else
 fi
 echo
 
-# Phase 2, WIF clusters only. After the cluster, so nothing is still
+# Phase 3, WIF clusters only. After the cluster, so nothing is still
 # authenticating through the pool while it goes.
 #
 # ccoctl finds the service accounts by display name, derived from the
@@ -261,7 +297,7 @@ elif ! GOOGLE_CREDENTIALS="$key_file" try "$ccoctl" gcp delete \
 fi
 echo
 
-# Phase 3. Say what is actually left rather than trusting the above.
+# Phase 4. Say what is actually left rather than trusting the above.
 # After a clean destroy every listing here comes back empty. Matching
 # is on "<infra>-", and the infra id itself starts "<name>-", so
 # nothing here can catch another cluster's resources: the timestamp in
@@ -316,6 +352,12 @@ else
             --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
         list_remaining "router" gcloud compute routers list \
             --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
+        # The hub is global and the spokes regional; listing spokes
+        # with no region covers every location.
+        list_remaining "ncc hub" gcloud network-connectivity hubs list \
+            --project "$GCP_PROJECT" --filter "name ~ /hubs/${infra}-" --format 'value(name.basename())'
+        list_remaining "ncc spoke" gcloud network-connectivity spokes list \
+            --project "$GCP_PROJECT" --filter "name ~ /spokes/${infra}-" --format 'value(name.basename())'
         list_remaining "address" gcloud compute addresses list \
             --project "$GCP_PROJECT" --filter "name ~ ^${infra}-" --format 'value(name)'
         list_remaining "backend service" gcloud compute backend-services list \
