@@ -414,8 +414,17 @@ else
     # The pool is listed live only; a deleted one lingers for 30 days
     # in a DELETED state the default listing leaves out. ccoctl's
     # service accounts keep the full name only in their display name,
-    # because their ids are cut to 12 characters of it.
+    # because their ids are cut to 12 characters of it. ccoctl's OIDC
+    # bucket is <wif_name>-oidc, which the infra-id bucket listing
+    # above cannot see, and which exists without an infra id when the
+    # install died after ccoctl ran.
     if [ -n "$wif_name" ]; then
+        oidc_bucket_matching() {
+            local out
+            out="$(gcloud storage ls --project "$GCP_PROJECT" 2>/dev/null)" || return 1
+            printf '%s\n' "$out" | grep -Fx "gs://${wif_name}-oidc/" || true
+        }
+        list_remaining "wif bucket" oidc_bucket_matching
         list_remaining "wif pool" gcloud iam workload-identity-pools list \
             --project "$GCP_PROJECT" --location global \
             --filter "name ~ /workloadIdentityPools/${wif_name}\$" \
