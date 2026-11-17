@@ -39,10 +39,6 @@
             ocm # for the osd- scripts: rosa cannot build OSD on GCP
             openshift # oc
             jq
-            pass # for AWS_ACCOUNT_PASS: aws-saml runs pass from PATH
-            gnupg # pass cannot decrypt without it, and it is easy to
-            # miss because a nix user profile usually supplies gpg, so
-            # the shell looks complete when it is not
             curl # get-openshift-install require_cmd's it
             krb5 # kinit, klist
             openssl # aro-hcp-create-cluster signs its admin kubeconfig from a CSR

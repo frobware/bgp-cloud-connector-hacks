@@ -42,9 +42,7 @@ export AWS_ROLE=012345678901-openshift-installer-restricted
 ```
 
 `AWS_ACCOUNT_ID` is the SDKs' name for the account the credentials
-belong to, and aws-saml reads it too. aws-saml also accepts
-`AWS_ACCOUNT`, or `AWS_ACCOUNT_PASS` naming a pass entry whose first
-line is the id; the dev shell carries `pass` for that.
+belong to, and the one aws-saml reads.
 
 Account numbers and role names are not secrets exactly, but they are
 nobody else's business, which is why none of them is baked into a
