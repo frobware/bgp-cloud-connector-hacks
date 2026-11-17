@@ -39,7 +39,7 @@
             ocm # for the osd- scripts: rosa cannot build OSD on GCP
             openshift # oc
             jq
-            pass # reads the account id from a pass entry
+            pass # for AWS_ACCOUNT_PASS: aws-saml runs pass from PATH
             gnupg # pass cannot decrypt without it, and it is easy to
             # miss because a nix user profile usually supplies gpg, so
             # the shell looks complete when it is not
